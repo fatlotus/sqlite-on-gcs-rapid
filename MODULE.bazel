@@ -1,0 +1,9 @@
+module(
+    name = "sqlite_workspace",
+    version = "1.0.0",
+)
+
+bazel_dep(name = "sqlite3", version = "3.42.0.bcr.1")
+bazel_dep(name = "googletest", version = "1.15.2")
+bazel_dep(name = "abseil-cpp", version = "20240116.2")
+bazel_dep(name = "google_cloud_cpp", version = "3.5.0")

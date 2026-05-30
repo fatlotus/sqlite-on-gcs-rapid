@@ -1,0 +1,6 @@
+build --features=-layering_check
+build --copt=-no-canonical-prefixes
+build --cxxopt=-no-canonical-prefixes
+build --host_copt=-no-canonical-prefixes
+build --host_cxxopt=-no-canonical-prefixes
+build --action_env=DEVELOPER_DIR=/Library/Developer/CommandLineTools

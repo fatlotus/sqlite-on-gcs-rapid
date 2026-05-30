@@ -1,0 +1,151 @@
+cc_library(
+    name = "storage",
+    hdrs = ["storage.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_library(
+    name = "local_storage",
+    srcs = ["local_storage.cc"],
+    hdrs = ["local_storage.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":storage",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_library(
+    name = "gcs_client_mock",
+    hdrs = ["gcs_client_mock.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":storage",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_library(
+    name = "gcs_storage",
+    srcs = ["gcs_storage.cc"],
+    hdrs = ["gcs_storage.h"],
+    visibility = ["//visibility:public"],
+    defines = select({
+        ":use_real_gcs_sdk": ["USE_REAL_GCS_SDK"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":storage",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ] + select({
+        ":use_real_gcs_sdk": ["@google_cloud_cpp//:storage_grpc"],
+        "//conditions:default": [":gcs_client_mock"],
+    }),
+)
+
+cc_test(
+    name = "storage_test",
+    srcs = ["storage_test.cc"],
+    deps = [
+        ":local_storage",
+        ":gcs_storage",
+        ":gcs_client_mock",
+        ":storage",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "block_mapper",
+    srcs = ["block_mapper.cc"],
+    hdrs = ["block_mapper.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":storage",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_test(
+    name = "block_mapper_test",
+    srcs = ["block_mapper_test.cc"],
+    deps = [
+        ":block_mapper",
+        ":local_storage",
+        ":storage",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "vfs_backend",
+    srcs = ["vfs_backend.cc"],
+    hdrs = ["vfs_backend.h"],
+    visibility = ["//visibility:public"],
+    defines = select({
+        ":use_real_gcs_sdk": ["USE_REAL_GCS_SDK"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":block_mapper",
+        ":local_storage",
+        ":gcs_storage",
+        ":storage",
+        "@abseil-cpp//absl/status",
+        "@sqlite3//:sqlite3",
+    ] + select({
+        ":use_real_gcs_sdk": ["@google_cloud_cpp//:storage_grpc"],
+        "//conditions:default": [":gcs_client_mock"],
+    }),
+)
+
+cc_test(
+    name = "vfs_test",
+    srcs = ["vfs_test.cc"],
+    deps = [
+        ":vfs_backend",
+        ":gcs_client_mock",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@sqlite3//:sqlite3",
+    ],
+)
+
+cc_binary(
+    name = "sqlite3_cli",
+    srcs = ["sqlite3_cli.cc"],
+    copts = select({
+        ":use_real_gcs_sdk": ["-DUSE_REAL_GCS_SDK"],
+        "//conditions:default": [],
+    }),
+    defines = select({
+        ":use_real_gcs_sdk": ["USE_REAL_GCS_SDK"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":vfs_backend",
+        "@sqlite3//:sqlite3",
+    ] + select({
+        ":use_real_gcs_sdk": ["@google_cloud_cpp//:storage_grpc"],
+        "//conditions:default": [],
+    }),
+)
+
+config_setting(
+    name = "use_real_gcs_sdk",
+    define_values = {"use_real_gcs_sdk": "true"},
+)
+
