@@ -21,9 +21,6 @@
 #include "block_mapper.h"
 #include "local_storage.h"
 #include "gcs_storage.h"
-#ifndef USE_REAL_GCS_SDK
-#include "gcs_client_mock.h"
-#endif
 
 #include <unordered_map>
 #include <mutex>
@@ -227,11 +224,7 @@ static int xOpen(sqlite3_vfs* pVfs, const char* zName, sqlite3_file* pFile, int 
     std::string bucket = std::string(sub.substr(0, first_slash));
     std::string object = std::string(sub.substr(first_slash + 1));
     
-#ifdef USE_REAL_GCS_SDK
     auto storage_or = GcsRapidStorage::Create(bucket, object);
-#else
-    auto storage_or = GcsRapidStorage::Create(std::make_shared<google::cloud::storage::AsyncClient>(), bucket, object);
-#endif
     if (!storage_or.ok()) {
       if (is_gcs) ::unlink(path.c_str());
       return SQLITE_CANTOPEN;
@@ -296,19 +289,11 @@ static int xDelete(sqlite3_vfs* pVfs, const char* zName, int syncDir) {
     }
     std::string bucket = std::string(sub.substr(0, first_slash));
     std::string object = std::string(sub.substr(first_slash + 1));
-#ifdef USE_REAL_GCS_SDK
     google::cloud::storage::Client client(google::cloud::Options{});
     auto delete_status = client.DeleteObject(bucket, object);
     if (!delete_status.ok()) {
       return SQLITE_IOERR_DELETE;
     }
-#else
-    std::string registry_key = bucket + "/" + object;
-    {
-      std::lock_guard<std::mutex> lock(google::cloud::storage::GetRegistryMutex());
-      google::cloud::storage::GetMockRegistry().erase(registry_key);
-    }
-#endif
     return SQLITE_OK;
   } else {
     return g_default_vfs->xDelete(g_default_vfs, zName, syncDir);
@@ -343,17 +328,9 @@ static int xAccess(sqlite3_vfs* pVfs, const char* zName, int flags, int* pResOut
     std::string bucket = std::string(sub.substr(0, first_slash));
     std::string object = std::string(sub.substr(first_slash + 1));
     bool exists = false;
-#ifdef USE_REAL_GCS_SDK
     google::cloud::storage::Client client(google::cloud::Options{});
     auto metadata = client.GetObjectMetadata(bucket, object);
     exists = metadata.ok();
-#else
-    std::string registry_key = bucket + "/" + object;
-    {
-      std::lock_guard<std::mutex> lock(google::cloud::storage::GetRegistryMutex());
-      exists = google::cloud::storage::GetMockRegistry().find(registry_key) != google::cloud::storage::GetMockRegistry().end();
-    }
-#endif
     if (flags == SQLITE_ACCESS_EXISTS) {
       *pResOut = exists ? 1 : 0;
     } else {

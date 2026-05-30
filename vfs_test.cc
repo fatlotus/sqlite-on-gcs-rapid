@@ -9,7 +9,6 @@
 
 #include "gtest/gtest.h"
 #include "absl/status/status.h"
-#include "gcs_client_mock.h"
 
 namespace sqlite {
 namespace {
@@ -133,89 +132,6 @@ TEST_F(VfsTest, LocalStorageIntegration) {
   unlink((db_path + "-journal").c_str());
 }
 
-TEST_F(VfsTest, GcsStorageIntegration) {
-  std::string db_path = "gcs://test-bucket/db.sqlite";
-  std::string registry_key = "test-bucket/db.sqlite";
-
-  // Clean mock GCS registry
-  {
-    std::lock_guard<std::mutex> lock(google::cloud::storage::GetRegistryMutex());
-    google::cloud::storage::GetMockRegistry().erase(registry_key);
-    google::cloud::storage::GetMockRegistry().erase(registry_key + "-journal");
-  }
-
-  // 1. Open the database using VFS "appendonly"
-  sqlite3* db = nullptr;
-  int rc = sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "appendonly");
-  ASSERT_EQ(rc, SQLITE_OK);
-
-  // 2. Force SQLite to use 4096-byte database pages
-  ExecuteOrDie(db, "PRAGMA page_size = 4096;");
-
-  // 3. Create table and insert data
-  ExecuteOrDie(db, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);");
-  ExecuteOrDie(db, "INSERT INTO users (name) VALUES ('Alice'), ('Bob');");
-
-  // 4. Query and verify
-  auto users = QueryUsers(db);
-  ASSERT_EQ(users.size(), 2);
-  EXPECT_EQ(users[0], "Alice");
-  EXPECT_EQ(users[1], "Bob");
-
-  // 5. Close database
-  sqlite3_close(db);
-
-  // 6. Reopen database, query, and verify that the data is restored successfully
-  db = nullptr;
-  rc = sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE, "appendonly");
-  ASSERT_EQ(rc, SQLITE_OK);
-
-  users = QueryUsers(db);
-  ASSERT_EQ(users.size(), 2);
-  EXPECT_EQ(users[0], "Alice");
-  EXPECT_EQ(users[1], "Bob");
-
-  // Insert another row to prepare for crash test
-  ExecuteOrDie(db, "INSERT INTO users (name) VALUES ('Charlie');");
-
-  // Close database
-  sqlite3_close(db);
-
-  // 7. Simulate write crash: append 100 bytes of zeros to the physical mock object
-  {
-    std::lock_guard<std::mutex> lock(google::cloud::storage::GetRegistryMutex());
-    auto obj_data = google::cloud::storage::GetMockRegistry()[registry_key];
-    ASSERT_NE(obj_data, nullptr);
-    std::lock_guard<std::mutex> obj_lock(obj_data->mutex);
-    obj_data->data.insert(obj_data->data.end(), 100, 0);
-  }
-
-  // 8. Reopen database, verify it recovers and reads/writes successfully
-  db = nullptr;
-  rc = sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE, "appendonly");
-  ASSERT_EQ(rc, SQLITE_OK);
-
-  users = QueryUsers(db);
-  ASSERT_EQ(users.size(), 3);
-  EXPECT_EQ(users[0], "Alice");
-  EXPECT_EQ(users[1], "Bob");
-  EXPECT_EQ(users[2], "Charlie");
-
-  // Write new data
-  ExecuteOrDie(db, "INSERT INTO users (name) VALUES ('David');");
-  users = QueryUsers(db);
-  ASSERT_EQ(users.size(), 4);
-  EXPECT_EQ(users[3], "David");
-
-  sqlite3_close(db);
-
-  // Clean mock GCS registry
-  {
-    std::lock_guard<std::mutex> lock(google::cloud::storage::GetRegistryMutex());
-    google::cloud::storage::GetMockRegistry().erase(registry_key);
-    google::cloud::storage::GetMockRegistry().erase(registry_key + "-journal");
-  }
-}
 
 TEST_F(VfsTest, ConcurrentOpenReturnsBusy) {
   std::string db_path = GetTestFilePath("concurrent_open_test.db");

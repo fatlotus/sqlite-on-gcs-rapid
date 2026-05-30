@@ -25,24 +25,11 @@ Upon opening a database:
 ## Getting Started
 
 ### 1. Build the Code
-The project is built using Bazel and modern C++17. You can compile in two configurations:
+The project is built using Bazel and modern C++17. It compiles against the official `google-cloud-cpp` GCS client library and communicates natively via gRPC/REST APIs using your active Application Default Credentials (ADC).
 
-#### Option A: Offline / Mock Client Configuration (Recommended for local tests)
-Compiles against a fast, high-performance mock client to allow complete local unit and integration testing without requiring internet access or active GCP credentials.
 ```bash
 bazel build //:sqlite3_cli
 bazel test //...
-```
-
-To run this configuration against real GCS buckets using the `gcloud` CLI as a fallback sync engine, set `USE_REAL_GCS=1` in your environment:
-```bash
-USE_REAL_GCS=1 bazel-bin/sqlite3_cli gcs://<your-bucket-name>/db.sqlite
-```
-
-#### Option B: Real Google Cloud Storage C++ SDK Configuration
-Downloads and compiles the official `google-cloud-cpp` GCS client library and communicates natively via gRPC/REST APIs using your active Application Default Credentials (ADC).
-```bash
-bazel build //:sqlite3_cli --define=use_real_gcs_sdk=true --features=-layering_check --host_features=-layering_check --features=-use_header_modules --host_features=-use_header_modules
 ```
 
 ---
@@ -75,7 +62,7 @@ gcloud storage buckets create gs://my-sqlite-standard-bucket \
 
 The custom `sqlite3_cli` binary registers the `"appendonly"` VFS backend and automatically enforces 4k page alignment (`PRAGMA page_size = 4096`) required by the block mapper.
 
-### 1. Configure Credentials (for Real SDK mode)
+### 1. Configure Credentials
 Ensure your environment is authenticated with Application Default Credentials:
 ```bash
 gcloud auth application-default login

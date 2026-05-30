@@ -1,6 +1,12 @@
-build --features=-layering_check
-build --copt=-no-canonical-prefixes
-build --cxxopt=-no-canonical-prefixes
-build --host_copt=-no-canonical-prefixes
-build --host_cxxopt=-no-canonical-prefixes
-build --action_env=DEVELOPER_DIR=/Library/Developer/CommandLineTools
+# Bazel configuration file
+
+# Autoloading configurations for compatibility with Bazel 9.x
+build --incompatible_autoload_externally=cc_library,cc_binary,cc_test,py_test,py_binary,py_library,proto_library
+
+# Disable module maps and layering checks which cause compiler conflicts on macOS/Xcode
+build --features=-layering_check,-use_header_modules,-module_maps
+build --host_features=-layering_check,-use_header_modules,-module_maps
+
+# Propagate Xcode developer directory environment variable for hermetic compiler/SDK paths matching
+build --action_env=DEVELOPER_DIR
+build --host_action_env=DEVELOPER_DIR
