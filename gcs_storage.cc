@@ -60,21 +60,6 @@ GcsRapidStorage::GcsRapidStorage(
 
 GcsRapidStorage::~GcsRapidStorage() {
   (void)Sync();
-  decltype(token_) t;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    t = std::move(token_);
-  }
-  if (t.valid()) {
-    auto fut = writer_.Finalize(std::move(t));
-    fut.wait();
-    auto res = fut.get();
-    if (!res.ok()) {
-      std::cerr << "Failed to finalize GCS upload: " << res.status().message() << std::endl;
-    } else {
-      std::cerr << "Successfully finalized GCS upload." << std::endl;
-    }
-  }
 }
 
 absl::StatusOr<std::unique_ptr<GcsRapidStorage>> GcsRapidStorage::Create(
@@ -220,21 +205,6 @@ GcsRapidStorage::GcsRapidStorage(
 
 GcsRapidStorage::~GcsRapidStorage() {
   (void)Sync();
-  decltype(token_) t;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    t = std::move(token_);
-  }
-  if (!t.token().empty()) {
-    auto fut = writer_.Finalize(std::move(t));
-    fut.wait();
-    auto res = fut.get();
-    if (!res.ok()) {
-      std::cerr << "Failed to finalize GCS upload: " << res.status().message() << std::endl;
-    } else {
-      std::cerr << "Successfully finalized GCS upload." << std::endl;
-    }
-  }
 }
 
 absl::StatusOr<std::unique_ptr<GcsRapidStorage>> GcsRapidStorage::Create(
