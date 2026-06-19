@@ -34,22 +34,12 @@ sqlite3_vfs* g_default_vfs = nullptr;
 std::mutex g_registry_mutex;
 std::unordered_map<std::string, AppendOnlyFile*> g_open_files;
 
-std::mutex g_gcs_paths_mutex;
-std::unordered_map<std::string, std::string> g_gcs_paths; // local_path -> gcs_path
 
 static int xClose(sqlite3_file* pFile) {
   auto* file = reinterpret_cast<AppendOnlyFile*>(pFile);
   {
     std::lock_guard<std::mutex> lock(g_registry_mutex);
     g_open_files.erase(file->path);
-  }
-  bool is_gcs = false;
-  {
-    std::lock_guard<std::mutex> lock(g_gcs_paths_mutex);
-    is_gcs = g_gcs_paths.find(file->path) != g_gcs_paths.end();
-  }
-  if (is_gcs) {
-    ::unlink(file->path.c_str());
   }
   file->mapper.~unique_ptr<BlockMapper>();
   file->path.std::string::~string();
@@ -169,35 +159,15 @@ static const sqlite3_io_methods g_append_only_io_methods = {
 };
 
 static int xOpen(sqlite3_vfs* pVfs, const char* zName, sqlite3_file* pFile, int flags, int* pOutFlags) {
-  std::cerr << "xOpen: " << (zName ? zName : "NULL") << " flags " << flags << std::endl;
-  if (!(flags & SQLITE_OPEN_MAIN_DB)) {
-    int rc = g_default_vfs->xOpen(g_default_vfs, zName, pFile, flags, pOutFlags);
-    if (rc != SQLITE_OK) {
-      int err = errno;
-      std::cerr << "xOpen delegated returned " << rc << " errno " << err << " (" << std::strerror(err) << ")" << std::endl;
-    } else {
-      std::cerr << "xOpen delegated returned " << rc << std::endl;
-    }
-    return rc;
-  }
   if (zName == nullptr) {
     return SQLITE_CANTOPEN;
   }
   std::string path(zName);
-  std::string gcs_path;
-  {
-    std::lock_guard<std::mutex> lock(g_gcs_paths_mutex);
-    auto it = g_gcs_paths.find(path);
-    if (it != g_gcs_paths.end()) {
-      gcs_path = it->second;
-    }
-  }
-  std::cerr << "xOpen main DB path: " << path << " -> gcs_path: " << gcs_path << std::endl;
-  if (gcs_path.empty() && path.rfind("gcs://", 0) == 0) {
-    gcs_path = path;
-  }
+  bool is_gcs = (path.rfind("gcs://", 0) == 0);
 
-  bool is_gcs = !gcs_path.empty();
+  if (!is_gcs && !(flags & SQLITE_OPEN_MAIN_DB)) {
+    return g_default_vfs->xOpen(g_default_vfs, zName, pFile, flags, pOutFlags);
+  }
 
   {
     std::lock_guard<std::mutex> lock(g_registry_mutex);
@@ -206,19 +176,11 @@ static int xOpen(sqlite3_vfs* pVfs, const char* zName, sqlite3_file* pFile, int 
     }
   }
 
-  if (is_gcs) {
-    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
-    if (fd >= 0) {
-      ::close(fd);
-    }
-  }
-
   std::unique_ptr<AppendOnlyStorage> storage;
   if (is_gcs) {
-    std::string_view sub = std::string_view(gcs_path).substr(6);
+    std::string_view sub = std::string_view(path).substr(6);
     size_t first_slash = sub.find('/');
     if (first_slash == std::string_view::npos) {
-      if (is_gcs) ::unlink(path.c_str());
       return SQLITE_CANTOPEN;
     }
     std::string bucket = std::string(sub.substr(0, first_slash));
@@ -226,7 +188,6 @@ static int xOpen(sqlite3_vfs* pVfs, const char* zName, sqlite3_file* pFile, int 
     
     auto storage_or = GcsRapidStorage::Create(bucket, object);
     if (!storage_or.ok()) {
-      if (is_gcs) ::unlink(path.c_str());
       return SQLITE_CANTOPEN;
     }
     storage = std::move(storage_or.value());
@@ -241,9 +202,6 @@ static int xOpen(sqlite3_vfs* pVfs, const char* zName, sqlite3_file* pFile, int 
   auto mapper = std::make_unique<BlockMapper>(std::move(storage));
   absl::Status init_status = mapper->Init();
   if (!init_status.ok()) {
-    if (is_gcs) {
-      ::unlink(path.c_str());
-    }
     return SQLITE_CANTOPEN;
   }
   
@@ -268,21 +226,10 @@ static int xDelete(sqlite3_vfs* pVfs, const char* zName, int syncDir) {
     return SQLITE_IOERR_DELETE;
   }
   std::string path(zName);
-  std::string gcs_path;
-  {
-    std::lock_guard<std::mutex> lock(g_gcs_paths_mutex);
-    auto it = g_gcs_paths.find(path);
-    if (it != g_gcs_paths.end()) {
-      gcs_path = it->second;
-    }
-  }
-  if (gcs_path.empty() && path.rfind("gcs://", 0) == 0) {
-    gcs_path = path;
-  }
+  bool is_gcs = (path.rfind("gcs://", 0) == 0);
 
-  if (!gcs_path.empty()) {
-    ::unlink(path.c_str());
-    std::string_view sub = std::string_view(gcs_path).substr(6);
+  if (is_gcs) {
+    std::string_view sub = std::string_view(path).substr(6);
     size_t first_slash = sub.find('/');
     if (first_slash == std::string_view::npos) {
       return SQLITE_IOERR_DELETE;
@@ -291,7 +238,7 @@ static int xDelete(sqlite3_vfs* pVfs, const char* zName, int syncDir) {
     std::string object = std::string(sub.substr(first_slash + 1));
     google::cloud::storage::Client client(google::cloud::Options{});
     auto delete_status = client.DeleteObject(bucket, object);
-    if (!delete_status.ok()) {
+    if (!delete_status.ok() && delete_status.code() != google::cloud::StatusCode::kNotFound) {
       return SQLITE_IOERR_DELETE;
     }
     return SQLITE_OK;
@@ -306,20 +253,10 @@ static int xAccess(sqlite3_vfs* pVfs, const char* zName, int flags, int* pResOut
     return SQLITE_OK;
   }
   std::string path(zName);
-  std::string gcs_path;
-  {
-    std::lock_guard<std::mutex> lock(g_gcs_paths_mutex);
-    auto it = g_gcs_paths.find(path);
-    if (it != g_gcs_paths.end()) {
-      gcs_path = it->second;
-    }
-  }
-  if (gcs_path.empty() && path.rfind("gcs://", 0) == 0) {
-    gcs_path = path;
-  }
+  bool is_gcs = (path.rfind("gcs://", 0) == 0);
 
-  if (!gcs_path.empty()) {
-    std::string_view sub = std::string_view(gcs_path).substr(6);
+  if (is_gcs) {
+    std::string_view sub = std::string_view(path).substr(6);
     size_t first_slash = sub.find('/');
     if (first_slash == std::string_view::npos) {
       *pResOut = 0;
@@ -343,33 +280,16 @@ static int xAccess(sqlite3_vfs* pVfs, const char* zName, int flags, int* pResOut
 }
 
 static int xFullPathname(sqlite3_vfs* pVfs, const char* zName, int nOut, char* zOut) {
-  std::cerr << "xFullPathname: " << (zName ? zName : "NULL") << std::endl;
   if (zName == nullptr) {
     return SQLITE_CANTOPEN;
   }
   std::string path(zName);
   if (path.rfind("gcs://", 0) == 0) {
-    std::string suffix = path.substr(6);
-    std::replace(suffix.begin(), suffix.end(), '/', '_');
-    std::string flat_local_path;
-    const char* tmpdir = std::getenv("TEST_TMPDIR");
-    if (tmpdir != nullptr) {
-      flat_local_path = std::string(tmpdir) + "/gcs_" + suffix;
-    } else {
-      flat_local_path = "/tmp/gcs_" + suffix;
-    }
-
-    int rc = g_default_vfs->xFullPathname(g_default_vfs, flat_local_path.c_str(), nOut, zOut);
-    std::cerr << "xFullPathname GCS mapped flat_local_path " << flat_local_path << " -> zOut " << zOut << " rc " << rc << std::endl;
-    if ((rc & 0xFF) == SQLITE_OK) {
-      std::lock_guard<std::mutex> lock(g_gcs_paths_mutex);
-      g_gcs_paths[zOut] = path;
-    }
-    return rc;
+    std::strncpy(zOut, zName, nOut - 1);
+    zOut[nOut - 1] = '\0';
+    return SQLITE_OK;
   }
-  int rc = g_default_vfs->xFullPathname(g_default_vfs, zName, nOut, zOut);
-  std::cerr << "xFullPathname local path " << zName << " -> zOut " << zOut << " rc " << rc << std::endl;
-  return rc;
+  return g_default_vfs->xFullPathname(g_default_vfs, zName, nOut, zOut);
 }
 
 static void* xDlOpen(sqlite3_vfs* pVfs, const char* zFilename) {
@@ -405,15 +325,7 @@ static int xGetLastError(sqlite3_vfs* pVfs, int nByte, char* zOut) {
 }
 
 static int xCurrentTimeInt64(sqlite3_vfs* pVfs, sqlite3_int64* pTime) {
-  if (g_default_vfs->iVersion >= 2 && g_default_vfs->xCurrentTimeInt64) {
-    return g_default_vfs->xCurrentTimeInt64(g_default_vfs, pTime);
-  }
-  double t = 0.0;
-  int rc = g_default_vfs->xCurrentTime(g_default_vfs, &t);
-  if (rc == SQLITE_OK) {
-    *pTime = static_cast<sqlite3_int64>(t * 86400000.0);
-  }
-  return rc;
+  return g_default_vfs->xCurrentTimeInt64(g_default_vfs, pTime);
 }
 
 static sqlite3_vfs g_append_only_vfs = {

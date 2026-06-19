@@ -185,8 +185,8 @@ TEST_F(BlockMapperTest, CrashRecovery) {
     auto storage = std::move(storage_or.value());
 
     std::vector<uint8_t> garbage(100, 99);
-    auto append_fut = storage->AppendAsync(garbage.data(), garbage.size());
-    ASSERT_TRUE(append_fut.get().ok());
+    auto append_res = storage->Append(garbage.data(), garbage.size());
+    ASSERT_TRUE(append_res.ok());
   }
 
   // 3. Reopen the BlockMapper on the same file

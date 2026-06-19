@@ -1,18 +1,21 @@
 #include "gcs_storage.h"
 
+#include "google/cloud/storage/grpc_plugin.h"
+
 #include <utility>
 #include <vector>
 #include <future>
+#include <chrono>
 #include <iostream>
+#include <cstring>
+#include <algorithm>
+#include <thread>
+#include "absl/strings/str_format.h"
 
 namespace sqlite {
-namespace {
+namespace gcs = ::google::cloud::storage;
 
-Future<absl::StatusOr<int64_t>> MakeCompletedFuture(absl::StatusOr<int64_t> val) {
-  std::promise<absl::StatusOr<int64_t>> prom;
-  prom.set_value(val);
-  return Future<absl::StatusOr<int64_t>>(prom.get_future());
-}
+namespace {
 
 absl::Status ConvertStatus(const google::cloud::Status& s) {
   if (s.ok()) return absl::OkStatus();
@@ -38,131 +41,275 @@ absl::Status ConvertStatus(const google::cloud::Status& s) {
   return absl::Status(code, s.message());
 }
 
+absl::StatusOr<std::vector<uint8_t>> ReadDescriptorRange(
+    gcs::ObjectDescriptor& descriptor, std::int64_t offset, std::int64_t limit) {
+  auto start = std::chrono::steady_clock::now();
+  auto [reader, token] = descriptor.Read(offset, limit);
+  std::vector<uint8_t> data;
+  while (token.valid()) {
+    auto read_fut = reader.Read(std::move(token));
+    read_fut.wait();
+    auto res_or = read_fut.get();
+    if (!res_or.ok()) {
+      auto end = std::chrono::steady_clock::now();
+      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+      std::cerr << "TIME_LOG: ReadDescriptorRange failed after " << ms << " ms: " << res_or.status().message() << std::endl;
+      return ConvertStatus(res_or.status());
+    }
+    auto& pair = res_or.value();
+    auto const& payload = pair.first;
+    token = std::move(pair.second);
+    for (absl::string_view sv : payload.contents()) {
+      data.insert(data.end(), sv.begin(), sv.end());
+    }
+  }
+  auto end = std::chrono::steady_clock::now();
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+  std::cerr << "TIME_LOG: ReadDescriptorRange (offset=" << offset << ", limit=" << limit << ") took " << ms << " ms (returned " << data.size() << " bytes)" << std::endl;
+  return data;
+}
+
 } // namespace
 
 GcsRapidStorage::GcsRapidStorage(
-    std::shared_ptr<gcs_ex::AsyncClient> async_client,
-    gcs::Client client,
+    std::shared_ptr<gcs::AsyncClient> async_client,
     std::string bucket, std::string object,
-    gcs_ex::AsyncObjectWriter writer,
-    gcs_ex::AppendObjectToken token,
+    gcs::AsyncWriter writer,
+    gcs::AsyncToken token,
+    gcs::ObjectDescriptor descriptor,
     int64_t initial_offset)
     : async_client_(std::move(async_client)),
-      client_(std::move(client)),
       bucket_(std::move(bucket)),
       object_(std::move(object)),
       writer_(std::move(writer)),
       token_(std::move(token)),
-      current_offset_(initial_offset),
-      last_write_fut_(MakeCompletedFuture(0)) {}
+      descriptor_(std::move(descriptor)),
+      initial_offset_(initial_offset),
+      file_length_(initial_offset) {}
 
 GcsRapidStorage::~GcsRapidStorage() {
   (void)Sync();
+  bool has_writes = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    has_writes = (file_length_ > initial_offset_);
+  }
+  if (has_writes) {
+    auto close_fut = writer_.Close();
+    close_fut.wait();
+  }
 }
 
 absl::StatusOr<std::unique_ptr<GcsRapidStorage>> GcsRapidStorage::Create(
     const std::string& bucket, const std::string& object) {
-  std::cerr << "USING REAL GCS C++ SDK CONNECTION" << std::endl;
-  auto async_client = std::make_shared<gcs_ex::AsyncClient>(google::cloud::Options{});
-  auto client = gcs::Client(google::cloud::Options{});
-  
+  auto async_client = std::make_shared<gcs::AsyncClient>(google::cloud::Options{});
+  auto client = gcs::MakeGrpcClient(google::cloud::Options{});
+
   // Query metadata to get initial size/offset
   auto metadata = client.GetObjectMetadata(bucket, object);
   int64_t initial_offset = 0;
   if (metadata) {
     initial_offset = static_cast<int64_t>(metadata->size());
   } else if (metadata.status().code() != google::cloud::StatusCode::kNotFound) {
-    return ConvertStatus(metadata.status());
+    return absl::Status(ConvertStatus(metadata.status()).code(),
+                        absl::StrFormat("Failed to get GCS object metadata for bucket=%s object=%s: %s",
+                                        bucket, object, metadata.status().message()));
   }
 
-  auto future = async_client->StartAppendableObjectUpload(
-      gcs::BucketName(bucket), object);
-  future.wait();
-  auto result_or = future.get();
-  if (!result_or.ok()) {
-    return ConvertStatus(result_or.status());
+  std::pair<gcs::AsyncWriter, gcs::AsyncToken> pair;
+  if (metadata) {
+    auto future = async_client->ResumeAppendableObjectUpload(
+        gcs::BucketName(bucket), object, metadata->generation());
+    future.wait();
+    auto result_or = future.get();
+    if (!result_or.ok()) {
+      return absl::Status(ConvertStatus(result_or.status()).code(),
+                          absl::StrFormat("Failed to resume appendable upload for bucket=%s object=%s generation=%d: %s",
+                                          bucket, object, metadata->generation(), result_or.status().message()));
+    }
+    pair = std::move(result_or.value());
+  } else {
+    auto future = async_client->StartAppendableObjectUpload(
+        gcs::BucketName(bucket), object);
+    future.wait();
+    auto result_or = future.get();
+    if (!result_or.ok()) {
+      return absl::Status(ConvertStatus(result_or.status()).code(),
+                          absl::StrFormat("Failed to start appendable upload for bucket=%s object=%s: %s",
+                                          bucket, object, result_or.status().message()));
+    }
+    pair = std::move(result_or.value());
   }
-  auto& pair = result_or.value();
+
+  // Get the size of the (potentially unfinalized) object
+  auto const& state = pair.first.PersistedState();
+  if (std::holds_alternative<google::storage::v2::Object>(state)) {
+    initial_offset = std::get<google::storage::v2::Object>(state).size();
+  } else if (std::holds_alternative<std::int64_t>(state)) {
+    initial_offset = std::get<std::int64_t>(state);
+  }
+
+  auto desc_future = async_client->Open(gcs::BucketName(bucket), object);
+  desc_future.wait();
+  auto desc_or = desc_future.get();
+  if (!desc_or.ok()) {
+    return absl::Status(ConvertStatus(desc_or.status()).code(),
+                        absl::StrFormat("Failed to open GCS object descriptor for bucket=%s object=%s: %s",
+                                        bucket, object, desc_or.status().message()));
+  }
+
   return std::unique_ptr<GcsRapidStorage>(new GcsRapidStorage(
-      std::move(async_client), std::move(client), bucket, object,
-      std::move(pair.first), std::move(pair.second), initial_offset));
+      std::move(async_client), bucket, object,
+      std::move(pair.first), std::move(pair.second), std::move(desc_or.value()), initial_offset));
 }
 
-Future<absl::StatusOr<int64_t>> GcsRapidStorage::AppendAsync(const uint8_t* data, size_t size) {
+absl::StatusOr<int64_t> GcsRapidStorage::Append(const uint8_t* data, size_t size) {
+  std::cerr << "LOG: GcsRapidStorage::Append start: size=" << size << std::endl;
   std::lock_guard<std::mutex> lock(mutex_);
-  
-  auto payload = gcs::WritePayload(
-      std::vector<uint8_t>(data, data + size));
-  
-  last_write_fut_ = last_write_fut_.then(
-      [this, payload = std::move(payload), size](absl::StatusOr<int64_t> prev_status) mutable -> absl::StatusOr<int64_t> {
-        if (!prev_status.ok()) {
-          return prev_status.status();
-        }
-        
-        gcs_ex::AppendObjectToken current_token;
-        int64_t write_offset = 0;
-        {
-          std::lock_guard<std::mutex> token_lock(mutex_);
-          current_token = std::move(token_);
-          write_offset = current_offset_;
-        }
-        
-        auto write_fut = writer_.Write(std::move(current_token), std::move(payload));
-        write_fut.wait();
-        auto result_or = write_fut.get();
-        if (!result_or.ok()) {
-          return ConvertStatus(result_or.status());
-        }
 
-        {
-          std::lock_guard<std::mutex> token_lock(mutex_);
-          token_ = std::move(result_or.value());
-          current_offset_ += size;
-        }
-        return write_offset;
-      });
-      
-  return last_write_fut_;
+  int64_t write_offset = file_length_;
+  if (size > 0 && data != nullptr) {
+    buffer_.insert(buffer_.end(), data, data + size);
+    file_length_ += size;
+  }
+
+  std::cerr << "LOG: GcsRapidStorage::Append end: offset=" << write_offset << ", size=" << size << std::endl;
+  return write_offset;
 }
 
 absl::Status GcsRapidStorage::Sync() {
-  Future<absl::StatusOr<int64_t>> fut;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    fut = last_write_fut_;
+  std::cerr << "LOG: GcsRapidStorage::Sync start" << std::endl;
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (buffer_.empty()) {
+    std::cerr << "LOG: GcsRapidStorage::Sync end: no writes to sync" << std::endl;
+    return absl::OkStatus();
   }
-  if (fut.valid()) {
-    fut.wait();
-    auto res = fut.get();
-    if (!res.ok()) {
-      return res.status();
-    }
+
+  auto payload = gcs::WritePayload(std::move(buffer_));
+  buffer_.clear();
+
+  auto write_fut = writer_.Write(std::move(token_), std::move(payload));
+  write_fut.wait();
+  auto result_or = write_fut.get();
+  if (!result_or.ok()) {
+    auto status = ConvertStatus(result_or.status());
+    std::cerr << "LOG: GcsRapidStorage::Sync end: write failed: " << status.message() << std::endl;
+    return status;
   }
+  token_ = std::move(result_or.value());
+
+  auto flush_fut = writer_.Flush();
+  flush_fut.wait();
+  auto flush_status = flush_fut.get();
+  if (!flush_status.ok()) {
+    auto status = ConvertStatus(flush_status);
+    std::cerr << "LOG: GcsRapidStorage::Sync end: flush failed: " << status.message() << std::endl;
+    return status;
+  }
+
+  std::cerr << "LOG: GcsRapidStorage::Sync end: success" << std::endl;
   return absl::OkStatus();
 }
 
 absl::StatusOr<size_t> GcsRapidStorage::PRead(uint8_t* buf, size_t size, int64_t offset) {
-  auto stream = client_.ReadObject(bucket_, object_, gcs::ReadRange(offset, offset + size));
-  if (!stream.status().ok()) {
-    return ConvertStatus(stream.status());
+  std::cerr << "LOG: GcsRapidStorage::PRead start: offset=" << offset << ", size=" << size << std::endl;
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (offset < 0) {
+    auto status = absl::InvalidArgumentError("Offset cannot be negative");
+    std::cerr << "LOG: GcsRapidStorage::PRead end: error=" << status.message() << std::endl;
+    return status;
   }
-  stream.read(reinterpret_cast<char*>(buf), size);
-  if (stream.bad()) {
-    return ConvertStatus(stream.status());
+
+  if (offset + size > file_length_) {
+    auto status = absl::OutOfRangeError(
+        absl::StrFormat("Attempted to read past EOF (offset=%d, size=%d, file_length=%d)",
+                        offset, size, file_length_));
+    std::cerr << "LOG: GcsRapidStorage::PRead end: error=" << status.message() << std::endl;
+    return status;
   }
-  return static_cast<size_t>(stream.gcount());
+
+  int64_t buffer_start_offset = file_length_ - buffer_.size();
+
+  if (offset >= buffer_start_offset) {
+    std::memcpy(buf, buffer_.data() + (offset - buffer_start_offset), size);
+    std::cerr << "LOG: GcsRapidStorage::PRead end: success (read from buffer)" << std::endl;
+    return size;
+  }
+
+  size_t gcs_read_size = size;
+  size_t buffer_read_size = 0;
+
+  if (offset + size > buffer_start_offset) {
+    gcs_read_size = buffer_start_offset - offset;
+    buffer_read_size = offset + size - buffer_start_offset;
+  }
+
+  int backoff_ms = 10;
+  int attempt = 0;
+  constexpr int kMaxAttempts = 15;
+
+  while (true) {
+    attempt++;
+    int64_t current_desc_size = 0;
+    auto meta = descriptor_.metadata();
+    if (meta.has_value()) {
+      current_desc_size = meta->size();
+    }
+
+    if (offset + gcs_read_size > current_desc_size || attempt > 1) {
+      auto desc_future = async_client_->Open(gcs::BucketName(bucket_), object_);
+      desc_future.wait();
+      auto desc_or = desc_future.get();
+      if (desc_or.ok()) {
+        descriptor_ = std::move(desc_or.value());
+      }
+    }
+
+    auto data_or = ReadDescriptorRange(descriptor_, offset, gcs_read_size);
+
+    bool is_out_of_range = false;
+    if (!data_or.ok()) {
+      if (data_or.status().code() == absl::StatusCode::kOutOfRange) {
+        is_out_of_range = true;
+      } else {
+        auto status = absl::Status(data_or.status().code(),
+                                   absl::StrFormat("GcsRapidStorage::PRead read failed: %s", data_or.status().message()));
+        std::cerr << "LOG: GcsRapidStorage::PRead end: error=" << status.message() << std::endl;
+        return status;
+      }
+    } else if (data_or->size() < gcs_read_size) {
+      is_out_of_range = true;
+    }
+
+    if (is_out_of_range) {
+      if (attempt >= kMaxAttempts) {
+        auto status = absl::DeadlineExceededError(
+            absl::StrFormat("Timed out waiting for GCS object to be readable at offset %d size %d", offset, gcs_read_size));
+        std::cerr << "LOG: GcsRapidStorage::PRead end: error=" << status.message() << std::endl;
+        return status;
+      }
+      std::cerr << "LOG: GcsRapidStorage::PRead: Out of range read, backing off for " << backoff_ms << " ms (attempt " << attempt << ")" << std::endl;
+      std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+      backoff_ms = std::min(backoff_ms * 2, 2000);
+      continue;
+    }
+
+    std::memcpy(buf, data_or->data(), gcs_read_size);
+    if (buffer_read_size > 0) {
+      std::memcpy(buf + gcs_read_size, buffer_.data(), buffer_read_size);
+    }
+    std::cerr << "LOG: GcsRapidStorage::PRead end: success" << std::endl;
+    return size;
+  }
 }
 
 absl::StatusOr<int64_t> GcsRapidStorage::GetSize() {
-  auto metadata = client_.GetObjectMetadata(bucket_, object_);
-  if (!metadata) {
-    if (metadata.status().code() == google::cloud::StatusCode::kNotFound) {
-      return 0;
-    }
-    return ConvertStatus(metadata.status());
-  }
-  return static_cast<int64_t>(metadata->size());
+  std::cerr << "LOG: GcsRapidStorage::GetSize start" << std::endl;
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::cerr << "LOG: GcsRapidStorage::GetSize end: size=" << file_length_ << std::endl;
+  return file_length_;
 }
 
 } // namespace sqlite

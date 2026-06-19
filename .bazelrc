@@ -10,3 +10,8 @@ build --host_features=-layering_check,-use_header_modules,-module_maps
 # Propagate Xcode developer directory environment variable for hermetic compiler/SDK paths matching
 build --action_env=DEVELOPER_DIR
 build --host_action_env=DEVELOPER_DIR
+
+# Set C++20 standard
+build --cxxopt=-std=c++20
+build --host_cxxopt=-std=c++20
+

@@ -29,8 +29,7 @@ absl::Status BlockMapper::Init() {
     std::vector<uint8_t> padding(pad_size, 0);
     // last byte set to 0 (is_good = 0), which is already done since vector is initialized to 0
 
-    auto append_fut = storage_->AppendAsync(padding.data(), padding.size());
-    auto append_res = append_fut.get();
+    auto append_res = storage_->Append(padding.data(), padding.size());
     if (!append_res.ok()) {
       return append_res.status();
     }
@@ -183,8 +182,7 @@ absl::Status BlockMapper::Write(const uint8_t* buf, size_t size, int64_t logical
     record_buf[4104] = 1; // is_good = 1
 
     // Append to storage
-    auto fut = storage_->AppendAsync(record_buf, 4105);
-    auto append_res = fut.get();
+    auto append_res = storage_->Append(record_buf, 4105);
     if (!append_res.ok()) {
       return append_res.status();
     }
@@ -218,8 +216,7 @@ absl::Status BlockMapper::Truncate(int64_t new_size) {
   std::memset(record_buf + 16, 0, 4088);
   record_buf[4104] = 1; // is_good = 1
 
-  auto fut = storage_->AppendAsync(record_buf, 4105);
-  auto append_res = fut.get();
+  auto append_res = storage_->Append(record_buf, 4105);
   if (!append_res.ok()) {
     return append_res.status();
   }

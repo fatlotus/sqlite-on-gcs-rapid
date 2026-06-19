@@ -6,27 +6,14 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <iostream>
 #include <vector>
-
-#ifdef __APPLE__
-#define fdatasync(fd) fsync(fd)
-#endif
 
 namespace sqlite {
 
-LocalStorage::LocalStorage(int fd) : fd_(fd) {
-  worker_thread_ = std::thread(&LocalStorage::WorkerLoop, this);
-}
+LocalStorage::LocalStorage(int fd) : fd_(fd) {}
 
 LocalStorage::~LocalStorage() {
-  {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    stop_ = true;
-  }
-  queue_cv_.notify_all();
-  if (worker_thread_.joinable()) {
-    worker_thread_.join();
-  }
   if (fd_ >= 0) {
     close(fd_);
   }
@@ -40,29 +27,18 @@ absl::StatusOr<std::unique_ptr<LocalStorage>> LocalStorage::Open(const std::stri
   return std::unique_ptr<LocalStorage>(new LocalStorage(fd));
 }
 
-void LocalStorage::WorkerLoop() {
-  while (true) {
-    Task task;
-    {
-      std::unique_lock<std::mutex> lock(queue_mutex_);
-      queue_cv_.wait(lock, [this]() { return stop_ || !queue_.empty(); });
-      if (stop_ && queue_.empty()) {
-        break;
-      }
-      task = std::move(queue_.front());
-      queue_.pop();
-    }
-    task.promise.set_value(AppendSync(task.data.data(), task.data.size()));
-  }
-}
-
-absl::StatusOr<int64_t> LocalStorage::AppendSync(const uint8_t* data, size_t size) {
+absl::StatusOr<int64_t> LocalStorage::Append(const uint8_t* data, size_t size) {
+  std::cerr << "LOG: LocalStorage::Append start: size=" << size << std::endl;
   std::lock_guard<std::mutex> lock(mutex_);
+
   off_t offset = lseek(fd_, 0, SEEK_END);
   if (offset < 0) {
-    return absl::ErrnoToStatus(errno, "Failed to lseek to end of file");
+    auto status = absl::ErrnoToStatus(errno, "Failed to lseek to end of file");
+    std::cerr << "LOG: LocalStorage::Append end: error=" << status.message() << std::endl;
+    return status;
   }
   if (size == 0) {
+    std::cerr << "LOG: LocalStorage::Append end: offset=" << offset << std::endl;
     return static_cast<int64_t>(offset);
   }
 
@@ -73,50 +49,34 @@ absl::StatusOr<int64_t> LocalStorage::AppendSync(const uint8_t* data, size_t siz
       if (errno == EINTR) {
         continue;
       }
-      return absl::ErrnoToStatus(errno, "Failed to write to file");
+      auto status = absl::ErrnoToStatus(errno, "Failed to write to file");
+      std::cerr << "LOG: LocalStorage::Append end: error=" << status.message() << std::endl;
+      return status;
     }
     bytes_written += res;
   }
+  std::cerr << "LOG: LocalStorage::Append end: offset=" << offset << std::endl;
   return static_cast<int64_t>(offset);
 }
 
-Future<absl::StatusOr<int64_t>> LocalStorage::AppendAsync(const uint8_t* data, size_t size) {
-  Task task;
-  if (size > 0 && data != nullptr) {
-    task.data.assign(data, data + size);
-  }
-  auto fut = task.promise.get_future();
-
-  {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    if (stop_) {
-      std::promise<absl::StatusOr<int64_t>> prom;
-      prom.set_value(absl::FailedPreconditionError("Storage is closed"));
-      return Future<absl::StatusOr<int64_t>>(prom.get_future());
-    }
-    queue_.push(std::move(task));
-  }
-  queue_cv_.notify_one();
-
-  return Future<absl::StatusOr<int64_t>>(std::move(fut));
-}
-
 absl::Status LocalStorage::Sync() {
-  auto fut = AppendAsync(nullptr, 0);
-  auto res = fut.get();
-  if (!res.ok()) {
-    return res.status();
-  }
+  std::cerr << "LOG: LocalStorage::Sync start" << std::endl;
   std::lock_guard<std::mutex> lock(mutex_);
-  if (fdatasync(fd_) < 0) {
-    return absl::ErrnoToStatus(errno, "Failed to fdatasync");
+  if (fsync(fd_) < 0) {
+    auto status = absl::ErrnoToStatus(errno, "Failed to fsync");
+    std::cerr << "LOG: LocalStorage::Sync end: error=" << status.message() << std::endl;
+    return status;
   }
+  std::cerr << "LOG: LocalStorage::Sync end: success" << std::endl;
   return absl::OkStatus();
 }
 
 absl::StatusOr<size_t> LocalStorage::PRead(uint8_t* buf, size_t size, int64_t offset) {
+  std::cerr << "LOG: LocalStorage::PRead start: size=" << size << ", offset=" << offset << std::endl;
   if (offset < 0) {
-    return absl::InvalidArgumentError("Offset cannot be negative");
+    auto status = absl::InvalidArgumentError("Offset cannot be negative");
+    std::cerr << "LOG: LocalStorage::PRead end: error=" << status.message() << std::endl;
+    return status;
   }
 
   size_t bytes_read = 0;
@@ -126,7 +86,9 @@ absl::StatusOr<size_t> LocalStorage::PRead(uint8_t* buf, size_t size, int64_t of
       if (errno == EINTR) {
         continue;
       }
-      return absl::ErrnoToStatus(errno, "Failed to pread from file");
+      auto status = absl::ErrnoToStatus(errno, "Failed to pread from file");
+      std::cerr << "LOG: LocalStorage::PRead end: error=" << status.message() << std::endl;
+      return status;
     }
     if (res == 0) {
       // EOF reached.
@@ -134,15 +96,20 @@ absl::StatusOr<size_t> LocalStorage::PRead(uint8_t* buf, size_t size, int64_t of
     }
     bytes_read += res;
   }
+  std::cerr << "LOG: LocalStorage::PRead end: bytes_read=" << bytes_read << std::endl;
   return bytes_read;
 }
 
 absl::StatusOr<int64_t> LocalStorage::GetSize() {
+  std::cerr << "LOG: LocalStorage::GetSize start" << std::endl;
   std::lock_guard<std::mutex> lock(mutex_);
   struct stat st;
   if (fstat(fd_, &st) < 0) {
-    return absl::ErrnoToStatus(errno, "Failed to fstat file");
+    auto status = absl::ErrnoToStatus(errno, "Failed to fstat file");
+    std::cerr << "LOG: LocalStorage::GetSize end: error=" << status.message() << std::endl;
+    return status;
   }
+  std::cerr << "LOG: LocalStorage::GetSize end: size=" << st.st_size << std::endl;
   return static_cast<int64_t>(st.st_size);
 }
 

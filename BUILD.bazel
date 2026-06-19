@@ -27,11 +27,12 @@ cc_library(
     srcs = ["gcs_storage.cc"],
     hdrs = ["gcs_storage.h"],
     visibility = ["//visibility:public"],
-    defines = ["USE_REAL_GCS_SDK"],
+
     deps = [
         ":storage",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
         "@google_cloud_cpp//:storage_grpc",
     ],
 )
@@ -46,6 +47,18 @@ cc_test(
         "@abseil-cpp//absl/status",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "gcs_storage_test",
+    srcs = ["gcs_storage_test.cc"],
+    deps = [
+        ":gcs_storage",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@google_cloud_cpp//:storage_grpc_mocks",
     ],
 )
 
@@ -79,7 +92,7 @@ cc_library(
     srcs = ["vfs_backend.cc"],
     hdrs = ["vfs_backend.h"],
     visibility = ["//visibility:public"],
-    defines = ["USE_REAL_GCS_SDK"],
+
     deps = [
         ":block_mapper",
         ":local_storage",
@@ -106,7 +119,7 @@ cc_test(
 cc_binary(
     name = "sqlite3_cli",
     srcs = ["sqlite3_cli.cc"],
-    defines = ["USE_REAL_GCS_SDK"],
+
     deps = [
         ":vfs_backend",
         "@sqlite3//:sqlite3",

@@ -54,10 +54,8 @@ TEST_F(LocalStorageTest, BasicAppendAndRead) {
   auto storage = std::move(storage_or.value());
 
   std::string data1 = "Hello, world!";
-  auto fut1 = storage->AppendAsync(reinterpret_cast<const uint8_t*>(data1.data()), data1.size());
-  fut1.wait();
-  ASSERT_TRUE(fut1.valid());
-  EXPECT_TRUE(fut1.get().ok());
+  auto res1 = storage->Append(reinterpret_cast<const uint8_t*>(data1.data()), data1.size());
+  ASSERT_TRUE(res1.ok());
 
   auto size_or = storage->GetSize();
   ASSERT_TRUE(size_or.ok());
@@ -78,11 +76,11 @@ TEST_F(LocalStorageTest, PReadOffsets) {
   std::string data1 = "ABC";
   std::string data2 = "DEF";
 
-  auto fut1 = storage->AppendAsync(reinterpret_cast<const uint8_t*>(data1.data()), data1.size());
-  EXPECT_TRUE(fut1.get().ok());
+  auto res1 = storage->Append(reinterpret_cast<const uint8_t*>(data1.data()), data1.size());
+  EXPECT_TRUE(res1.ok());
 
-  auto fut2 = storage->AppendAsync(reinterpret_cast<const uint8_t*>(data2.data()), data2.size());
-  EXPECT_TRUE(fut2.get().ok());
+  auto res2 = storage->Append(reinterpret_cast<const uint8_t*>(data2.data()), data2.size());
+  EXPECT_TRUE(res2.ok());
 
   // Reading DEF starting at offset 3
   uint8_t buf[3] = {0};
@@ -98,30 +96,6 @@ TEST_F(LocalStorageTest, PReadOffsets) {
   EXPECT_EQ(std::string(reinterpret_cast<char*>(buf), 3), "ABC");
 }
 
-TEST_F(LocalStorageTest, FutureThenChaining) {
-  auto storage_or = LocalStorage::Open(test_path_);
-  ASSERT_TRUE(storage_or.ok());
-  auto storage = std::move(storage_or.value());
-
-  std::string data = "Chaining test";
-  Future<absl::StatusOr<int64_t>> append_fut = storage->AppendAsync(
-      reinterpret_cast<const uint8_t*>(data.data()), data.size());
-
-  Future<std::string> success_fut = append_fut.then([](absl::StatusOr<int64_t> status) {
-    if (status.ok()) {
-      return std::string("OK");
-    }
-    return std::string("ERROR");
-  });
-
-  Future<int> length_fut = success_fut.then([](std::string s) {
-    return static_cast<int>(s.length());
-  });
-
-  length_fut.wait();
-  EXPECT_EQ(length_fut.get(), 2);  // "OK".length() is 2
-}
-
 TEST_F(LocalStorageTest, ConcurrentAppends) {
   auto storage_or = LocalStorage::Open(test_path_);
   ASSERT_TRUE(storage_or.ok());
@@ -132,26 +106,19 @@ TEST_F(LocalStorageTest, ConcurrentAppends) {
   std::string append_data = "x"; // 1 byte
 
   std::vector<std::thread> threads;
-  std::vector<Future<absl::StatusOr<int64_t>>> futures;
-  std::mutex futures_mutex;
 
   for (int i = 0; i < kNumThreads; ++i) {
     threads.emplace_back([&]() {
       for (int j = 0; j < kAppendsPerThread; ++j) {
-        auto fut = storage->AppendAsync(
+        auto res = storage->Append(
             reinterpret_cast<const uint8_t*>(append_data.data()), append_data.size());
-        std::lock_guard<std::mutex> lock(futures_mutex);
-        futures.push_back(std::move(fut));
+        EXPECT_TRUE(res.ok());
       }
     });
   }
 
   for (auto& t : threads) {
     t.join();
-  }
-
-  for (auto& fut : futures) {
-    EXPECT_TRUE(fut.get().ok());
   }
 
   auto size_or = storage->GetSize();

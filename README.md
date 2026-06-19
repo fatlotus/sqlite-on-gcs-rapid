@@ -22,15 +22,84 @@ Upon opening a database:
 
 ---
 
-## Getting Started
+## Build Instructions
 
-### 1. Build the Code
-The project is built using Bazel and modern C++17. It compiles against the official `google-cloud-cpp` GCS client library and communicates natively via gRPC/REST APIs using your active Application Default Credentials (ADC).
+This project can be built using either **Bazel** or **CMake**.
+
+### 1. Build and Run Tests using Bazel
+
+Bazel automatically manages all dependencies (including Abseil, GoogleTest, and `google-cloud-cpp`).
 
 ```bash
+# Build the SQLite3 CLI binary
 bazel build //:sqlite3_cli
+
+# Run all VFS and storage unit tests
 bazel test //...
 ```
+
+The compiled binary will be located at `bazel-bin/sqlite3_cli`.
+
+### 2. Build and Run Tests using CMake
+
+To build with CMake, make sure you have the required dependencies (Abseil, GoogleTest, SQLite3, and the Google Cloud Storage C++ SDK) installed. You can manage them using a package manager like `vcpkg`.
+
+#### With vcpkg integration:
+```bash
+# Configure the project pointing to the vcpkg toolchain
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=~/vcpkg/scripts/buildsystems/vcpkg.cmake
+
+# Compile targets
+cmake --build build
+
+# Run unit tests
+cd build && ctest --output-on-failure
+```
+
+The compiled binary will be located at `build/sqlite3_cli`.
+
+---
+
+## Operating the SQLite3 GCS CLI
+
+The custom `sqlite3_cli` binary registers the `"appendonly"` VFS backend and automatically enforces 4k page alignment (`PRAGMA page_size = 4096`) required by the block mapper.
+
+### 1. Configure Credentials
+Ensure your environment is authenticated with Google Cloud Application Default Credentials (ADC) so the GCS SDK can connect to your bucket:
+```bash
+gcloud auth application-default login
+```
+
+### 2. Run Database Queries Directly
+You can run query statements directly from the command line by passing the `gcs://` URI and the SQL commands:
+```bash
+# Using Bazel binary:
+bazel-bin/sqlite3_cli gcs://my-sqlite-rapid-bucket/db.sqlite \
+    "CREATE TABLE users(id INT, name TEXT); INSERT INTO users VALUES (1, 'Alice');"
+
+# Using CMake binary:
+./build/sqlite3_cli gcs://my-sqlite-rapid-bucket/db.sqlite \
+    "SELECT * FROM users;"
+```
+
+### 3. Interactive REPL Mode
+If no SQL command is provided, the CLI enters an interactive prompt:
+```bash
+# Using Bazel binary:
+bazel-bin/sqlite3_cli gcs://my-sqlite-rapid-bucket/db.sqlite
+
+# Using CMake binary:
+./build/sqlite3_cli gcs://my-sqlite-rapid-bucket/db.sqlite
+```
+
+Inside the interactive REPL prompt, type standard SQL commands or type `.exit` to sync and close:
+```sql
+sqlite> CREATE TABLE test(val TEXT);
+sqlite> INSERT INTO test VALUES ('GCS C++ SDK');
+sqlite> SELECT * FROM test;
+sqlite> .exit
+```
+When you exit, the connection writer completes and finalizes the upload stream, committing the database object to Google Cloud Storage.
 
 ---
 
@@ -55,41 +124,3 @@ gcloud storage buckets create gs://my-sqlite-standard-bucket \
     --uniform-bucket-level-access \
     --enable-hierarchical-namespace
 ```
-
----
-
-## Operating the SQLite3 GCS CLI
-
-The custom `sqlite3_cli` binary registers the `"appendonly"` VFS backend and automatically enforces 4k page alignment (`PRAGMA page_size = 4096`) required by the block mapper.
-
-### 1. Configure Credentials
-Ensure your environment is authenticated with Application Default Credentials:
-```bash
-gcloud auth application-default login
-```
-
-### 2. Run Database Operations
-You can run query statements directly from the command line:
-```bash
-# Create a table and insert rows
-bazel-bin/sqlite3_cli gcs://my-sqlite-standard-bucket/db.sqlite \
-    "CREATE TABLE users(id INT, name TEXT); INSERT INTO users VALUES (1, 'Alice');"
-
-# Query the rows
-bazel-bin/sqlite3_cli gcs://my-sqlite-standard-bucket/db.sqlite \
-    "SELECT * FROM users;"
-```
-
-### 3. Interactive REPL Mode
-If no SQL command is provided, the CLI enters an interactive prompt:
-```bash
-bazel-bin/sqlite3_cli gcs://my-sqlite-standard-bucket/db.sqlite
-```
-Inside the prompt, type standard SQL commands or type `.exit` to sync and close:
-```sql
-sqlite> CREATE TABLE test(val TEXT);
-sqlite> INSERT INTO test VALUES ('GCS C++ SDK');
-sqlite> SELECT * FROM test;
-sqlite> .exit
-```
-When you exit or sync, the connection writer completes and finalizes the upload stream, committing the database object to Google Cloud Storage.
