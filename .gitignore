@@ -4,6 +4,7 @@
 # IDEs and editor configuration
 .idea/
 .vscode/
+/compile_commands.json
 *.swp
 *~
 
@@ -14,3 +15,6 @@
 *.db
 *.db-journal
 *.db-wal
+
+# Cache files
+.cache/
