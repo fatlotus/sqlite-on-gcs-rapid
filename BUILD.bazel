@@ -18,6 +18,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":storage",
+        "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
     ],
@@ -31,6 +32,7 @@ cc_library(
 
     deps = [
         ":storage",
+        "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings:str_format",
@@ -160,4 +162,3 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
-
