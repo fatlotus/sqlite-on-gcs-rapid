@@ -24,45 +24,25 @@ Upon opening a database:
 
 ## Build Instructions
 
-This project can be built using either **Bazel** or **CMake**.
-
-### 1. Build and Run Tests using Bazel
+This project is built using **Bazel**.
 
 Bazel automatically manages all dependencies (including Abseil, GoogleTest, and `google-cloud-cpp`).
 
 ```bash
-# Build the SQLite3 CLI binary
-bazel build //:sqlite3_cli
+# Build the SQLite3 loadable VFS extension shared library
+bazel build //:libsqlite3_gcsvfs.so
 
-# Run all VFS and storage unit tests
+# Run all VFS unit, end-to-end, and integration tests
 bazel test //...
 ```
 
-The compiled binary will be located at `bazel-bin/sqlite3_cli`.
-
-### 2. Build and Run Tests using CMake
-
-To build with CMake, make sure you have the required dependencies (Abseil, GoogleTest, SQLite3, and the Google Cloud Storage C++ SDK) installed. You can manage them using a package manager like `vcpkg`.
-
-#### With vcpkg integration:
-```bash
-# Configure the project pointing to the vcpkg toolchain
-cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=~/vcpkg/scripts/buildsystems/vcpkg.cmake
-
-# Compile targets
-cmake --build build
-
-# Run unit tests
-cd build && ctest --output-on-failure
-```
-
-The compiled binary will be located at `build/sqlite3_cli`.
+The compiled shared library will be located at `bazel-bin/libsqlite3_gcsvfs.so`.
 
 ---
 
-## Operating the SQLite3 GCS CLI
+## Operating the VFS Extension with Vanilla SQLite3
 
-The custom `sqlite3_cli` binary registers the `"appendonly"` VFS backend and automatically enforces 4k page alignment (`PRAGMA page_size = 4096`) required by the block mapper.
+The built library is a standard SQLite3 loadable extension (https://sqlite.org/loadext.html). When loaded, it registers the `"appendonly"` VFS.
 
 ### 1. Configure Credentials
 Ensure your environment is authenticated with Google Cloud Application Default Credentials (ADC) so the GCS SDK can connect to your bucket:
@@ -70,36 +50,37 @@ Ensure your environment is authenticated with Google Cloud Application Default C
 gcloud auth application-default login
 ```
 
-### 2. Run Database Queries Directly
-You can run query statements directly from the command line by passing the `gcs://` URI and the SQL commands:
-```bash
-# Using Bazel binary:
-bazel-bin/sqlite3_cli gcs://my-sqlite-rapid-bucket/db.sqlite \
-    "CREATE TABLE users(id INT, name TEXT); INSERT INTO users VALUES (1, 'Alice');"
+### 2. Loading the Extension and Querying GCS
+Because the database connection must be open using the `"appendonly"` VFS, you cannot pass the GCS URL directly on the command line if the extension is not yet loaded. Instead, you load the extension in an in-memory session, then use the `.open` command with a GCS URI filename:
 
-# Using CMake binary:
-./build/sqlite3_cli gcs://my-sqlite-rapid-bucket/db.sqlite \
-    "SELECT * FROM users;"
+```bash
+# Start vanilla sqlite3 shell
+bazel-bin/external/sqlite3+/shell
 ```
 
-### 3. Interactive REPL Mode
-If no SQL command is provided, the CLI enters an interactive prompt:
-```bash
-# Using Bazel binary:
-bazel-bin/sqlite3_cli gcs://my-sqlite-rapid-bucket/db.sqlite
-
-# Using CMake binary:
-./build/sqlite3_cli gcs://my-sqlite-rapid-bucket/db.sqlite
-```
-
-Inside the interactive REPL prompt, type standard SQL commands or type `.exit` to sync and close:
+Inside the interactive prompt:
 ```sql
-sqlite> CREATE TABLE test(val TEXT);
-sqlite> INSERT INTO test VALUES ('GCS C++ SDK');
-sqlite> SELECT * FROM test;
-sqlite> .exit
+-- 1. Load the extension
+.load bazel-bin/libsqlite3_gcsvfs.so
+
+-- 2. Enable URI filename support
+PRAGMA uri = ON;
+
+-- 3. Open the database using the GCS URI filename and specify the VFS
+.open file:gcs://my-sqlite-rapid-bucket/db.sqlite?vfs=appendonly
+
+-- 4. Set page size to 4k (mandatory for the block mapper layer)
+PRAGMA page_size = 4096;
+
+-- 5. Standard SQL operations
+CREATE TABLE test(val TEXT);
+INSERT INTO test VALUES ('GCS C++ SDK');
+SELECT * FROM test;
+.exit
 ```
+
 When you exit, the connection writer completes and finalizes the upload stream, committing the database object to Google Cloud Storage.
+
 
 ---
 

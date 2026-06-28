@@ -1,7 +1,7 @@
 #ifndef VFS_BACKEND_H_
 #define VFS_BACKEND_H_
 
-#include <sqlite3.h>
+#include <sqlite3ext.h>
 #include <memory>
 #include <string>
 #include "absl/status/status.h"

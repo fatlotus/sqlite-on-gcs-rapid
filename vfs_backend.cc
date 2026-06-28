@@ -1,6 +1,6 @@
 #include "vfs_backend.h"
-
-#include <sqlite3.h>
+#include <sqlite3ext.h>
+SQLITE_EXTENSION_INIT3
 #include <fcntl.h>
 #include <iostream>
 #include <sys/stat.h>

@@ -1,4 +1,5 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 cc_library(
     name = "storage",
@@ -91,6 +92,7 @@ cc_library(
     name = "vfs_backend",
     srcs = ["vfs_backend.cc"],
     hdrs = ["vfs_backend.h"],
+    defines = ["SQLITE_CORE"],
     visibility = ["//visibility:public"],
 
     deps = [
@@ -117,13 +119,45 @@ cc_test(
 )
 
 cc_binary(
-    name = "sqlite3_cli",
-    srcs = ["sqlite3_cli.cc"],
-
+    name = "libsqlite3_gcsvfs.so",
+    srcs = [
+        "extension.cc",
+        "vfs_backend.cc",
+        "vfs_backend.h",
+    ],
+    copts = [
+        "-Iexternal/sqlite3+",
+    ],
+    linkshared = True,
+    visibility = ["//visibility:public"],
     deps = [
-        ":vfs_backend",
-        "@sqlite3//:sqlite3",
+        ":block_mapper",
+        ":local_storage",
+        ":gcs_storage",
+        ":storage",
+        "@abseil-cpp//absl/status",
+        "@sqlite3//:sqlite3ext",
         "@google_cloud_cpp//:storage_grpc",
+    ],
+)
+
+sh_test(
+    name = "e2e_shell_test",
+    srcs = ["e2e_shell_test.sh"],
+    data = [
+        ":libsqlite3_gcsvfs.so",
+        "@sqlite3//:shell",
+    ],
+)
+
+cc_test(
+    name = "gcs_integration_test",
+    srcs = ["gcs_integration_test.cc"],
+    data = [":libsqlite3_gcsvfs.so"],
+    deps = [
+        "@sqlite3//:sqlite3",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 

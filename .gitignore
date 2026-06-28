@@ -1,1 +1,16 @@
-build/
+# Bazel outputs
+/bazel-*
+
+# IDEs and editor configuration
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS files
+.DS_Store
+
+# SQLite files generated locally
+*.db
+*.db-journal
+*.db-wal
