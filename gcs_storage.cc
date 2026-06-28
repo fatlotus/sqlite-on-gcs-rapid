@@ -1,82 +1,80 @@
 #include "gcs_storage.h"
 
-#include "google/cloud/storage/grpc_plugin.h"
-
-#include "absl/log/log.h"
-#include "absl/strings/str_format.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
-#include <future>
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include "absl/log/log.h"
+#include "absl/strings/str_format.h"
+#include "google/cloud/storage/grpc_plugin.h"
 
 namespace sqlite {
 namespace gcs = ::google::cloud::storage;
 
 namespace {
 
-absl::Status ConvertStatus(const google::cloud::Status &s) {
-  if (s.ok())
-    return absl::OkStatus();
+absl::Status ConvertStatus(const google::cloud::Status& s) {
+  if (s.ok()) return absl::OkStatus();
   absl::StatusCode code;
   switch (s.code()) {
-  case google::cloud::StatusCode::kCancelled:
-    code = absl::StatusCode::kCancelled;
-    break;
-  case google::cloud::StatusCode::kInvalidArgument:
-    code = absl::StatusCode::kInvalidArgument;
-    break;
-  case google::cloud::StatusCode::kDeadlineExceeded:
-    code = absl::StatusCode::kDeadlineExceeded;
-    break;
-  case google::cloud::StatusCode::kNotFound:
-    code = absl::StatusCode::kNotFound;
-    break;
-  case google::cloud::StatusCode::kAlreadyExists:
-    code = absl::StatusCode::kAlreadyExists;
-    break;
-  case google::cloud::StatusCode::kPermissionDenied:
-    code = absl::StatusCode::kPermissionDenied;
-    break;
-  case google::cloud::StatusCode::kResourceExhausted:
-    code = absl::StatusCode::kResourceExhausted;
-    break;
-  case google::cloud::StatusCode::kFailedPrecondition:
-    code = absl::StatusCode::kFailedPrecondition;
-    break;
-  case google::cloud::StatusCode::kAborted:
-    code = absl::StatusCode::kAborted;
-    break;
-  case google::cloud::StatusCode::kOutOfRange:
-    code = absl::StatusCode::kOutOfRange;
-    break;
-  case google::cloud::StatusCode::kUnimplemented:
-    code = absl::StatusCode::kUnimplemented;
-    break;
-  case google::cloud::StatusCode::kInternal:
-    code = absl::StatusCode::kInternal;
-    break;
-  case google::cloud::StatusCode::kUnavailable:
-    code = absl::StatusCode::kUnavailable;
-    break;
-  case google::cloud::StatusCode::kDataLoss:
-    code = absl::StatusCode::kDataLoss;
-    break;
-  case google::cloud::StatusCode::kUnauthenticated:
-    code = absl::StatusCode::kUnauthenticated;
-    break;
-  default:
-    code = absl::StatusCode::kUnknown;
-    break;
+    case google::cloud::StatusCode::kCancelled:
+      code = absl::StatusCode::kCancelled;
+      break;
+    case google::cloud::StatusCode::kInvalidArgument:
+      code = absl::StatusCode::kInvalidArgument;
+      break;
+    case google::cloud::StatusCode::kDeadlineExceeded:
+      code = absl::StatusCode::kDeadlineExceeded;
+      break;
+    case google::cloud::StatusCode::kNotFound:
+      code = absl::StatusCode::kNotFound;
+      break;
+    case google::cloud::StatusCode::kAlreadyExists:
+      code = absl::StatusCode::kAlreadyExists;
+      break;
+    case google::cloud::StatusCode::kPermissionDenied:
+      code = absl::StatusCode::kPermissionDenied;
+      break;
+    case google::cloud::StatusCode::kResourceExhausted:
+      code = absl::StatusCode::kResourceExhausted;
+      break;
+    case google::cloud::StatusCode::kFailedPrecondition:
+      code = absl::StatusCode::kFailedPrecondition;
+      break;
+    case google::cloud::StatusCode::kAborted:
+      code = absl::StatusCode::kAborted;
+      break;
+    case google::cloud::StatusCode::kOutOfRange:
+      code = absl::StatusCode::kOutOfRange;
+      break;
+    case google::cloud::StatusCode::kUnimplemented:
+      code = absl::StatusCode::kUnimplemented;
+      break;
+    case google::cloud::StatusCode::kInternal:
+      code = absl::StatusCode::kInternal;
+      break;
+    case google::cloud::StatusCode::kUnavailable:
+      code = absl::StatusCode::kUnavailable;
+      break;
+    case google::cloud::StatusCode::kDataLoss:
+      code = absl::StatusCode::kDataLoss;
+      break;
+    case google::cloud::StatusCode::kUnauthenticated:
+      code = absl::StatusCode::kUnauthenticated;
+      break;
+    default:
+      code = absl::StatusCode::kUnknown;
+      break;
   }
   return absl::Status(code, s.message());
 }
 
-absl::StatusOr<std::vector<uint8_t>>
-ReadDescriptorRange(gcs::ObjectDescriptor &descriptor, std::int64_t offset,
-                    std::int64_t limit) {
+absl::StatusOr<std::vector<uint8_t>> ReadDescriptorRange(
+    gcs::ObjectDescriptor& descriptor, std::int64_t offset,
+    std::int64_t limit) {
   LOG(INFO) << "ReadDescriptorRange start: offset=" << offset
             << ", limit=" << limit;
   auto [reader, token] = descriptor.Read(offset, limit);
@@ -89,8 +87,8 @@ ReadDescriptorRange(gcs::ObjectDescriptor &descriptor, std::int64_t offset,
       LOG(ERROR) << "ReadDescriptorRange failed: " << res_or.status().message();
       return ConvertStatus(res_or.status());
     }
-    auto &pair = res_or.value();
-    auto const &payload = pair.first;
+    auto& pair = res_or.value();
+    auto const& payload = pair.first;
     token = std::move(pair.second);
     for (absl::string_view sv : payload.contents()) {
       data.insert(data.end(), sv.begin(), sv.end());
@@ -101,17 +99,21 @@ ReadDescriptorRange(gcs::ObjectDescriptor &descriptor, std::int64_t offset,
   return data;
 }
 
-} // namespace
+}  // namespace
 
 GcsRapidStorage::GcsRapidStorage(std::shared_ptr<gcs::AsyncClient> async_client,
                                  std::string bucket, std::string object,
                                  gcs::AsyncWriter writer, gcs::AsyncToken token,
                                  gcs::ObjectDescriptor descriptor,
                                  int64_t initial_offset)
-    : async_client_(std::move(async_client)), bucket_(std::move(bucket)),
-      object_(std::move(object)), writer_(std::move(writer)),
-      token_(std::move(token)), descriptor_(std::move(descriptor)),
-      initial_offset_(initial_offset), file_length_(initial_offset) {
+    : async_client_(std::move(async_client)),
+      bucket_(std::move(bucket)),
+      object_(std::move(object)),
+      writer_(std::move(writer)),
+      token_(std::move(token)),
+      descriptor_(std::move(descriptor)),
+      initial_offset_(initial_offset),
+      file_length_(initial_offset) {
   LOG(INFO) << "GcsRapidStorage::GcsRapidStorage start: bucket=" << bucket_
             << ", object=" << object_ << ", initial_offset=" << initial_offset_;
   LOG(INFO) << "GcsRapidStorage::GcsRapidStorage end";
@@ -132,12 +134,14 @@ GcsRapidStorage::~GcsRapidStorage() {
   LOG(INFO) << "GcsRapidStorage::~GcsRapidStorage end";
 }
 
-absl::StatusOr<std::unique_ptr<GcsRapidStorage>>
-GcsRapidStorage::Create(const std::string &bucket, const std::string &object) {
+absl::StatusOr<std::unique_ptr<GcsRapidStorage>> GcsRapidStorage::Create(
+    const std::string& bucket, const std::string& object) {
   LOG(INFO) << "GcsRapidStorage::Create start: bucket=" << bucket
             << ", object=" << object;
-  auto options = google::cloud::Options{}.set<
-      google::cloud::storage_experimental::EnableGrpcMetricsOption>(false);
+  auto options =
+      google::cloud::Options{}
+          .set<google::cloud::storage_experimental::EnableGrpcMetricsOption>(
+              false);
   auto async_client = std::make_shared<gcs::AsyncClient>(options);
   LOG(INFO) << "GcsRapidStorage::Create before MakeGrpcClient";
   auto client = gcs::MakeGrpcClient(options);
@@ -201,7 +205,7 @@ GcsRapidStorage::Create(const std::string &bucket, const std::string &object) {
   }
 
   // Get the size of the (potentially unfinalized) object
-  auto const &state = pair.first.PersistedState();
+  auto const& state = pair.first.PersistedState();
   if (std::holds_alternative<google::storage::v2::Object>(state)) {
     initial_offset = std::get<google::storage::v2::Object>(state).size();
   } else if (std::holds_alternative<std::int64_t>(state)) {
@@ -229,7 +233,7 @@ GcsRapidStorage::Create(const std::string &bucket, const std::string &object) {
       std::move(pair.second), std::move(desc_or.value()), initial_offset));
 }
 
-absl::StatusOr<int64_t> GcsRapidStorage::Append(const uint8_t *data,
+absl::StatusOr<int64_t> GcsRapidStorage::Append(const uint8_t* data,
                                                 size_t size) {
   LOG(INFO) << "GcsRapidStorage::Append start: size=" << size;
   std::lock_guard<std::mutex> lock(mutex_);
@@ -282,7 +286,7 @@ absl::Status GcsRapidStorage::Sync() {
   return absl::OkStatus();
 }
 
-absl::StatusOr<size_t> GcsRapidStorage::PRead(uint8_t *buf, size_t size,
+absl::StatusOr<size_t> GcsRapidStorage::PRead(uint8_t* buf, size_t size,
                                               int64_t offset) {
   LOG(INFO) << "GcsRapidStorage::PRead start: offset=" << offset
             << ", size=" << size;
@@ -390,4 +394,4 @@ absl::StatusOr<int64_t> GcsRapidStorage::GetSize() {
   return file_length_;
 }
 
-} // namespace sqlite
+}  // namespace sqlite

@@ -2,8 +2,10 @@
 #define VFS_BACKEND_H_
 
 #include <sqlite3ext.h>
+
 #include <memory>
 #include <string>
+
 #include "absl/status/status.h"
 #include "block_mapper.h"
 

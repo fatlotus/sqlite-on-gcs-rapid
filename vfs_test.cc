@@ -1,14 +1,14 @@
-#include "vfs_backend.h"
-
 #include <fcntl.h>
-#include <unistd.h>
 #include <sqlite3.h>
+#include <unistd.h>
+
 #include <cstdlib>
 #include <string>
 #include <vector>
 
-#include "gtest/gtest.h"
 #include "absl/status/status.h"
+#include "gtest/gtest.h"
+#include "vfs_backend.h"
 
 namespace sqlite {
 namespace {
@@ -28,13 +28,15 @@ void ExecuteOrDie(sqlite3* db, const std::string& sql) {
   if (err_msg) {
     sqlite3_free(err_msg);
   }
-  ASSERT_EQ(rc, SQLITE_OK) << "Failed to execute: " << sql << ", Error: " << err;
+  ASSERT_EQ(rc, SQLITE_OK) << "Failed to execute: " << sql
+                           << ", Error: " << err;
 }
 
 std::vector<std::string> QueryUsers(sqlite3* db) {
   std::vector<std::string> names;
   sqlite3_stmt* stmt = nullptr;
-  int rc = sqlite3_prepare_v2(db, "SELECT name FROM users ORDER BY id;", -1, &stmt, nullptr);
+  int rc = sqlite3_prepare_v2(db, "SELECT name FROM users ORDER BY id;", -1,
+                              &stmt, nullptr);
   if (rc != SQLITE_OK) {
     return names;
   }
@@ -63,7 +65,9 @@ TEST_F(VfsTest, LocalStorageIntegration) {
 
   // 1. Open the database using VFS "appendonly"
   sqlite3* db = nullptr;
-  int rc = sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "appendonly");
+  int rc =
+      sqlite3_open_v2(db_path.c_str(), &db,
+                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "appendonly");
   ASSERT_EQ(rc, SQLITE_OK);
 
   // 2. Force SQLite to use 4096-byte database pages
@@ -82,9 +86,11 @@ TEST_F(VfsTest, LocalStorageIntegration) {
   // 5. Close database
   sqlite3_close(db);
 
-  // 6. Reopen database, query, and verify that the data is restored successfully
+  // 6. Reopen database, query, and verify that the data is restored
+  // successfully
   db = nullptr;
-  rc = sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE, "appendonly");
+  rc = sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE,
+                       "appendonly");
   ASSERT_EQ(rc, SQLITE_OK);
 
   users = QueryUsers(db);
@@ -110,7 +116,8 @@ TEST_F(VfsTest, LocalStorageIntegration) {
 
   // 8. Reopen database, verify it recovers and reads/writes successfully
   db = nullptr;
-  rc = sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE, "appendonly");
+  rc = sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE,
+                       "appendonly");
   ASSERT_EQ(rc, SQLITE_OK);
 
   users = QueryUsers(db);
@@ -132,19 +139,21 @@ TEST_F(VfsTest, LocalStorageIntegration) {
   unlink((db_path + "-journal").c_str());
 }
 
-
 TEST_F(VfsTest, ConcurrentOpenReturnsBusy) {
   std::string db_path = GetTestFilePath("concurrent_open_test.db");
   unlink(db_path.c_str());
 
   // 1. Open the database first time
   sqlite3* db1 = nullptr;
-  int rc1 = sqlite3_open_v2(db_path.c_str(), &db1, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "appendonly");
+  int rc1 =
+      sqlite3_open_v2(db_path.c_str(), &db1,
+                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "appendonly");
   ASSERT_EQ(rc1, SQLITE_OK);
 
   // 2. Try to open the database second time concurrently
   sqlite3* db2 = nullptr;
-  int rc2 = sqlite3_open_v2(db_path.c_str(), &db2, SQLITE_OPEN_READWRITE, "appendonly");
+  int rc2 = sqlite3_open_v2(db_path.c_str(), &db2, SQLITE_OPEN_READWRITE,
+                            "appendonly");
   // It should fail with SQLITE_BUSY
   EXPECT_EQ(rc2, SQLITE_BUSY);
   if (db2) {
@@ -156,7 +165,8 @@ TEST_F(VfsTest, ConcurrentOpenReturnsBusy) {
 
   // 4. Try to open it again after closing - should succeed
   sqlite3* db3 = nullptr;
-  int rc3 = sqlite3_open_v2(db_path.c_str(), &db3, SQLITE_OPEN_READWRITE, "appendonly");
+  int rc3 = sqlite3_open_v2(db_path.c_str(), &db3, SQLITE_OPEN_READWRITE,
+                            "appendonly");
   EXPECT_EQ(rc3, SQLITE_OK);
   if (db3) {
     sqlite3_close(db3);

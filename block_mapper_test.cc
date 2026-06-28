@@ -1,14 +1,15 @@
 #include "block_mapper.h"
-#include "local_storage.h"
 
-#include <cstdlib>
-#include <string>
-#include <vector>
-#include <memory>
 #include <unistd.h>
 
-#include "gtest/gtest.h"
+#include <cstdlib>
+#include <memory>
+#include <string>
+#include <vector>
+
 #include "absl/status/status.h"
+#include "gtest/gtest.h"
+#include "local_storage.h"
 
 namespace sqlite {
 namespace {
@@ -29,9 +30,7 @@ class BlockMapperTest : public ::testing::Test {
     unlink(test_path_.c_str());
   }
 
-  void TearDown() override {
-    unlink(test_path_.c_str());
-  }
+  void TearDown() override { unlink(test_path_.c_str()); }
 
   std::string test_path_;
 };
@@ -63,7 +62,7 @@ TEST_F(BlockMapperTest, BasicReadWrite) {
   EXPECT_EQ(read_data, write_data);
 
   // Read unmapped range, should return zeroes.
-  std::vector<uint8_t> unmapped_data(100, 1); // fill with 1s first
+  std::vector<uint8_t> unmapped_data(100, 1);  // fill with 1s first
   read_status = mapper->Read(unmapped_data.data(), unmapped_data.size(), 4096);
   ASSERT_TRUE(read_status.ok());
   for (uint8_t val : unmapped_data) {
@@ -97,7 +96,8 @@ TEST_F(BlockMapperTest, ReadModifyWrite) {
     EXPECT_EQ(read_buf[i], 0);
   }
 
-  // 2. Partial write spanning block boundary (write 10 bytes at offset 4090, which spans block 0 and 1)
+  // 2. Partial write spanning block boundary (write 10 bytes at offset 4090,
+  // which spans block 0 and 1)
   std::vector<uint8_t> p2 = {20, 21, 22, 23, 24, 25, 26, 27, 28, 29};
   status = mapper->Write(p2.data(), p2.size(), 4090);
   ASSERT_TRUE(status.ok());
@@ -107,7 +107,7 @@ TEST_F(BlockMapperTest, ReadModifyWrite) {
   std::vector<uint8_t> boundary_buf(20, 99);
   status = mapper->Read(boundary_buf.data(), boundary_buf.size(), 4085);
   ASSERT_TRUE(status.ok());
-  
+
   // indices 0-4 correspond to logical offsets 4085-4089 (should be 0)
   for (int i = 0; i < 5; ++i) {
     EXPECT_EQ(boundary_buf[i], 0);
@@ -121,7 +121,8 @@ TEST_F(BlockMapperTest, ReadModifyWrite) {
     EXPECT_EQ(boundary_buf[i], 0);
   }
 
-  // Also make sure [100, 110) still has p1 data (Read-Modify-Write preserved it)
+  // Also make sure [100, 110) still has p1 data (Read-Modify-Write preserved
+  // it)
   std::vector<uint8_t> p1_check(10, 0);
   status = mapper->Read(p1_check.data(), p1_check.size(), 100);
   ASSERT_TRUE(status.ok());
@@ -178,7 +179,8 @@ TEST_F(BlockMapperTest, CrashRecovery) {
     ASSERT_TRUE(mapper->Write(b1.data(), b1.size(), 4096).ok());
   }
 
-  // 2. Simulate crash by appending a partial record (e.g. write 100 bytes of garbage)
+  // 2. Simulate crash by appending a partial record (e.g. write 100 bytes of
+  // garbage)
   {
     auto storage_or = LocalStorage::Open(test_path_);
     ASSERT_TRUE(storage_or.ok());
@@ -195,7 +197,8 @@ TEST_F(BlockMapperTest, CrashRecovery) {
     ASSERT_TRUE(storage_or.ok());
     auto storage = std::move(storage_or.value());
 
-    // Check size before Init to verify we appended 100 bytes (2 * 4105 + 100 = 8310)
+    // Check size before Init to verify we appended 100 bytes (2 * 4105 + 100 =
+    // 8310)
     auto size_or = storage->GetSize();
     ASSERT_TRUE(size_or.ok());
     EXPECT_EQ(size_or.value(), 8310);
@@ -205,9 +208,10 @@ TEST_F(BlockMapperTest, CrashRecovery) {
 
     // Verify it padded the file correctly to a multiple of 4105.
     // 2 * 4105 + 100 + padding = 3 * 4105 = 12315
-    // Let's open a temp storage just to verify physical size, or we can add a way to check it.
-    // Wait, the mapper doesn't expose physical size, but we can verify it via LocalStorage on the path,
-    // or by making a new LocalStorage. Let's check size using a temporary open.
+    // Let's open a temp storage just to verify physical size, or we can add a
+    // way to check it. Wait, the mapper doesn't expose physical size, but we
+    // can verify it via LocalStorage on the path, or by making a new
+    // LocalStorage. Let's check size using a temporary open.
     {
       auto check_storage_or = LocalStorage::Open(test_path_);
       ASSERT_TRUE(check_storage_or.ok());

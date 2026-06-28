@@ -20,7 +20,8 @@ LocalStorage::~LocalStorage() {
   }
 }
 
-absl::StatusOr<std::unique_ptr<LocalStorage>> LocalStorage::Open(const std::string& path) {
+absl::StatusOr<std::unique_ptr<LocalStorage>> LocalStorage::Open(
+    const std::string& path) {
   int fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
   if (fd < 0) {
     return absl::ErrnoToStatus(errno, "Failed to open file: " + path);
@@ -72,8 +73,10 @@ absl::Status LocalStorage::Sync() {
   return absl::OkStatus();
 }
 
-absl::StatusOr<size_t> LocalStorage::PRead(uint8_t* buf, size_t size, int64_t offset) {
-  LOG(INFO) << "LocalStorage::PRead start: size=" << size << ", offset=" << offset;
+absl::StatusOr<size_t> LocalStorage::PRead(uint8_t* buf, size_t size,
+                                           int64_t offset) {
+  LOG(INFO) << "LocalStorage::PRead start: size=" << size
+            << ", offset=" << offset;
   if (offset < 0) {
     auto status = absl::InvalidArgumentError("Offset cannot be negative");
     LOG(ERROR) << "LocalStorage::PRead end: error=" << status.message();
@@ -82,7 +85,8 @@ absl::StatusOr<size_t> LocalStorage::PRead(uint8_t* buf, size_t size, int64_t of
 
   size_t bytes_read = 0;
   while (bytes_read < size) {
-    ssize_t res = pread(fd_, buf + bytes_read, size - bytes_read, offset + bytes_read);
+    ssize_t res =
+        pread(fd_, buf + bytes_read, size - bytes_read, offset + bytes_read);
     if (res < 0) {
       if (errno == EINTR) {
         continue;

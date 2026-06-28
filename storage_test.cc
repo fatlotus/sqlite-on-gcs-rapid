@@ -1,15 +1,16 @@
 #include "storage.h"
-#include "local_storage.h"
-#include "gcs_storage.h"
+
+#include <unistd.h>
 
 #include <cstdlib>
 #include <string>
-#include <vector>
 #include <thread>
-#include <unistd.h>
+#include <vector>
 
-#include "gtest/gtest.h"
 #include "absl/status/status.h"
+#include "gcs_storage.h"
+#include "gtest/gtest.h"
+#include "local_storage.h"
 
 namespace sqlite {
 namespace {
@@ -30,9 +31,7 @@ class LocalStorageTest : public ::testing::Test {
     unlink(test_path_.c_str());
   }
 
-  void TearDown() override {
-    unlink(test_path_.c_str());
-  }
+  void TearDown() override { unlink(test_path_.c_str()); }
 
   std::string test_path_;
 };
@@ -54,7 +53,8 @@ TEST_F(LocalStorageTest, BasicAppendAndRead) {
   auto storage = std::move(storage_or.value());
 
   std::string data1 = "Hello, world!";
-  auto res1 = storage->Append(reinterpret_cast<const uint8_t*>(data1.data()), data1.size());
+  auto res1 = storage->Append(reinterpret_cast<const uint8_t*>(data1.data()),
+                              data1.size());
   ASSERT_TRUE(res1.ok());
 
   auto size_or = storage->GetSize();
@@ -76,10 +76,12 @@ TEST_F(LocalStorageTest, PReadOffsets) {
   std::string data1 = "ABC";
   std::string data2 = "DEF";
 
-  auto res1 = storage->Append(reinterpret_cast<const uint8_t*>(data1.data()), data1.size());
+  auto res1 = storage->Append(reinterpret_cast<const uint8_t*>(data1.data()),
+                              data1.size());
   EXPECT_TRUE(res1.ok());
 
-  auto res2 = storage->Append(reinterpret_cast<const uint8_t*>(data2.data()), data2.size());
+  auto res2 = storage->Append(reinterpret_cast<const uint8_t*>(data2.data()),
+                              data2.size());
   EXPECT_TRUE(res2.ok());
 
   // Reading DEF starting at offset 3
@@ -103,7 +105,7 @@ TEST_F(LocalStorageTest, ConcurrentAppends) {
 
   constexpr int kNumThreads = 10;
   constexpr int kAppendsPerThread = 20;
-  std::string append_data = "x"; // 1 byte
+  std::string append_data = "x";  // 1 byte
 
   std::vector<std::thread> threads;
 
@@ -111,7 +113,8 @@ TEST_F(LocalStorageTest, ConcurrentAppends) {
     threads.emplace_back([&]() {
       for (int j = 0; j < kAppendsPerThread; ++j) {
         auto res = storage->Append(
-            reinterpret_cast<const uint8_t*>(append_data.data()), append_data.size());
+            reinterpret_cast<const uint8_t*>(append_data.data()),
+            append_data.size());
         EXPECT_TRUE(res.ok());
       }
     });

@@ -1,29 +1,30 @@
 #include "vfs_backend.h"
+
 #include <sqlite3ext.h>
 SQLITE_EXTENSION_INIT3
 #include <fcntl.h>
-#include <iostream>
 #include <sys/stat.h>
 
 #ifndef SQLITE_IOERR_DIRTY
-#define SQLITE_IOERR_DIRTY (SQLITE_IOERR | (36<<8))
+#define SQLITE_IOERR_DIRTY (SQLITE_IOERR | (36 << 8))
 #endif
 #include <unistd.h>
-#include <cstring>
-#include <memory>
-#include <string>
-#include <string_view>
-#include <utility>
+
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
 
 #include "absl/status/status.h"
 #include "block_mapper.h"
-#include "local_storage.h"
 #include "gcs_storage.h"
-
-#include <unordered_map>
-#include <mutex>
+#include "google/cloud/storage/client.h"
+#include "local_storage.h"
 
 namespace sqlite {
 
@@ -33,7 +34,6 @@ sqlite3_vfs* g_default_vfs = nullptr;
 
 std::mutex g_registry_mutex;
 std::unordered_map<std::string, AppendOnlyFile*> g_open_files;
-
 
 static int xClose(sqlite3_file* pFile) {
   auto* file = reinterpret_cast<AppendOnlyFile*>(pFile);
@@ -46,7 +46,8 @@ static int xClose(sqlite3_file* pFile) {
   return SQLITE_OK;
 }
 
-static int xRead(sqlite3_file* pFile, void* pBuf, int iAmt, sqlite3_int64 iOfst) {
+static int xRead(sqlite3_file* pFile, void* pBuf, int iAmt,
+                 sqlite3_int64 iOfst) {
   auto* file = reinterpret_cast<AppendOnlyFile*>(pFile);
   if (!file->mapper) {
     return SQLITE_IOERR_READ;
@@ -57,14 +58,16 @@ static int xRead(sqlite3_file* pFile, void* pBuf, int iAmt, sqlite3_int64 iOfst)
     return SQLITE_IOERR_SHORT_READ;
   } else if (iOfst + iAmt > logical_size) {
     int64_t read_len = logical_size - iOfst;
-    absl::Status status = file->mapper->Read(reinterpret_cast<uint8_t*>(pBuf), read_len, iOfst);
+    absl::Status status =
+        file->mapper->Read(reinterpret_cast<uint8_t*>(pBuf), read_len, iOfst);
     if (!status.ok()) {
       return SQLITE_IOERR_READ;
     }
     std::memset(reinterpret_cast<char*>(pBuf) + read_len, 0, iAmt - read_len);
     return SQLITE_IOERR_SHORT_READ;
   } else {
-    absl::Status status = file->mapper->Read(reinterpret_cast<uint8_t*>(pBuf), iAmt, iOfst);
+    absl::Status status =
+        file->mapper->Read(reinterpret_cast<uint8_t*>(pBuf), iAmt, iOfst);
     if (!status.ok()) {
       return SQLITE_IOERR_READ;
     }
@@ -72,12 +75,14 @@ static int xRead(sqlite3_file* pFile, void* pBuf, int iAmt, sqlite3_int64 iOfst)
   }
 }
 
-static int xWrite(sqlite3_file* pFile, const void* pBuf, int iAmt, sqlite3_int64 iOfst) {
+static int xWrite(sqlite3_file* pFile, const void* pBuf, int iAmt,
+                  sqlite3_int64 iOfst) {
   auto* file = reinterpret_cast<AppendOnlyFile*>(pFile);
   if (!file->mapper) {
     return SQLITE_IOERR_WRITE;
   }
-  absl::Status status = file->mapper->Write(reinterpret_cast<const uint8_t*>(pBuf), iAmt, iOfst);
+  absl::Status status =
+      file->mapper->Write(reinterpret_cast<const uint8_t*>(pBuf), iAmt, iOfst);
   if (!status.ok()) {
     return SQLITE_IOERR_WRITE;
   }
@@ -117,13 +122,9 @@ static int xFileSize(sqlite3_file* pFile, sqlite3_int64* pSize) {
   return SQLITE_OK;
 }
 
-static int xLock(sqlite3_file* pFile, int eLock) {
-  return SQLITE_OK;
-}
+static int xLock(sqlite3_file* pFile, int eLock) { return SQLITE_OK; }
 
-static int xUnlock(sqlite3_file* pFile, int eLock) {
-  return SQLITE_OK;
-}
+static int xUnlock(sqlite3_file* pFile, int eLock) { return SQLITE_OK; }
 
 static int xCheckReservedLock(sqlite3_file* pFile, int* pResOut) {
   *pResOut = 0;
@@ -134,31 +135,30 @@ static int xFileControl(sqlite3_file* pFile, int op, void* pArg) {
   return SQLITE_NOTFOUND;
 }
 
-static int xSectorSize(sqlite3_file* pFile) {
-  return 4096;
-}
+static int xSectorSize(sqlite3_file* pFile) { return 4096; }
 
 static int xDeviceCharacteristics(sqlite3_file* pFile) {
   return SQLITE_IOCAP_SAFE_APPEND;
 }
 
 static const sqlite3_io_methods g_append_only_io_methods = {
-  1,                          /* iVersion */
-  xClose,                     /* xClose */
-  xRead,                      /* xRead */
-  xWrite,                     /* xWrite */
-  xTruncate,                  /* xTruncate */
-  xSync,                      /* xSync */
-  xFileSize,                  /* xFileSize */
-  xLock,                      /* xLock */
-  xUnlock,                    /* xUnlock */
-  xCheckReservedLock,         /* xCheckReservedLock */
-  xFileControl,               /* xFileControl */
-  xSectorSize,                /* xSectorSize */
-  xDeviceCharacteristics      /* xDeviceCharacteristics */
+    1,                     /* iVersion */
+    xClose,                /* xClose */
+    xRead,                 /* xRead */
+    xWrite,                /* xWrite */
+    xTruncate,             /* xTruncate */
+    xSync,                 /* xSync */
+    xFileSize,             /* xFileSize */
+    xLock,                 /* xLock */
+    xUnlock,               /* xUnlock */
+    xCheckReservedLock,    /* xCheckReservedLock */
+    xFileControl,          /* xFileControl */
+    xSectorSize,           /* xSectorSize */
+    xDeviceCharacteristics /* xDeviceCharacteristics */
 };
 
-static int xOpen(sqlite3_vfs* pVfs, const char* zName, sqlite3_file* pFile, int flags, int* pOutFlags) {
+static int xOpen(sqlite3_vfs* pVfs, const char* zName, sqlite3_file* pFile,
+                 int flags, int* pOutFlags) {
   if (zName == nullptr) {
     return SQLITE_CANTOPEN;
   }
@@ -185,7 +185,7 @@ static int xOpen(sqlite3_vfs* pVfs, const char* zName, sqlite3_file* pFile, int 
     }
     std::string bucket = std::string(sub.substr(0, first_slash));
     std::string object = std::string(sub.substr(first_slash + 1));
-    
+
     auto storage_or = GcsRapidStorage::Create(bucket, object);
     if (!storage_or.ok()) {
       return SQLITE_CANTOPEN;
@@ -198,18 +198,18 @@ static int xOpen(sqlite3_vfs* pVfs, const char* zName, sqlite3_file* pFile, int 
     }
     storage = std::move(storage_or.value());
   }
-  
+
   auto mapper = std::make_unique<BlockMapper>(std::move(storage));
   absl::Status init_status = mapper->Init();
   if (!init_status.ok()) {
     return SQLITE_CANTOPEN;
   }
-  
+
   auto* file = reinterpret_cast<AppendOnlyFile*>(pFile);
   new (&file->mapper) std::unique_ptr<BlockMapper>(std::move(mapper));
   new (&file->path) std::string(std::move(path));
   file->base.pMethods = &g_append_only_io_methods;
-  
+
   {
     std::lock_guard<std::mutex> lock(g_registry_mutex);
     g_open_files[file->path] = file;
@@ -238,7 +238,8 @@ static int xDelete(sqlite3_vfs* pVfs, const char* zName, int syncDir) {
     std::string object = std::string(sub.substr(first_slash + 1));
     google::cloud::storage::Client client(google::cloud::Options{});
     auto delete_status = client.DeleteObject(bucket, object);
-    if (!delete_status.ok() && delete_status.code() != google::cloud::StatusCode::kNotFound) {
+    if (!delete_status.ok() &&
+        delete_status.code() != google::cloud::StatusCode::kNotFound) {
       return SQLITE_IOERR_DELETE;
     }
     return SQLITE_OK;
@@ -247,7 +248,8 @@ static int xDelete(sqlite3_vfs* pVfs, const char* zName, int syncDir) {
   }
 }
 
-static int xAccess(sqlite3_vfs* pVfs, const char* zName, int flags, int* pResOut) {
+static int xAccess(sqlite3_vfs* pVfs, const char* zName, int flags,
+                   int* pResOut) {
   if (zName == nullptr) {
     *pResOut = 0;
     return SQLITE_OK;
@@ -279,7 +281,8 @@ static int xAccess(sqlite3_vfs* pVfs, const char* zName, int flags, int* pResOut
   }
 }
 
-static int xFullPathname(sqlite3_vfs* pVfs, const char* zName, int nOut, char* zOut) {
+static int xFullPathname(sqlite3_vfs* pVfs, const char* zName, int nOut,
+                         char* zOut) {
   if (zName == nullptr) {
     return SQLITE_CANTOPEN;
   }
@@ -300,7 +303,8 @@ static void xDlError(sqlite3_vfs* pVfs, int nByte, char* zErrMsg) {
   g_default_vfs->xDlError(g_default_vfs, nByte, zErrMsg);
 }
 
-static void (*xDlSym(sqlite3_vfs* pVfs, void* pHandle, const char* zSymbol))(void) {
+static void (*xDlSym(sqlite3_vfs* pVfs, void* pHandle,
+                     const char* zSymbol))(void) {
   return g_default_vfs->xDlSym(g_default_vfs, pHandle, zSymbol);
 }
 
@@ -329,25 +333,25 @@ static int xCurrentTimeInt64(sqlite3_vfs* pVfs, sqlite3_int64* pTime) {
 }
 
 static sqlite3_vfs g_append_only_vfs = {
-  2,                              /* iVersion (v2 supports xCurrentTimeInt64) */
-  sizeof(AppendOnlyFile),         /* szOsFile */
-  1024,                           /* mxPathname */
-  nullptr,                        /* pNext */
-  "appendonly",                   /* zName */
-  nullptr,                        /* pAppData */
-  xOpen,                          /* xOpen */
-  xDelete,                        /* xDelete */
-  xAccess,                        /* xAccess */
-  xFullPathname,                  /* xFullPathname */
-  xDlOpen,                        /* xDlOpen */
-  xDlError,                       /* xDlError */
-  xDlSym,                         /* xDlSym */
-  xDlClose,                       /* xDlClose */
-  xRandomness,                    /* xRandomness */
-  xSleep,                         /* xSleep */
-  xCurrentTime,                   /* xCurrentTime */
-  xGetLastError,                  /* xGetLastError */
-  xCurrentTimeInt64               /* xCurrentTimeInt64 */
+    2,                      /* iVersion (v2 supports xCurrentTimeInt64) */
+    sizeof(AppendOnlyFile), /* szOsFile */
+    1024,                   /* mxPathname */
+    nullptr,                /* pNext */
+    "appendonly",           /* zName */
+    nullptr,                /* pAppData */
+    xOpen,                  /* xOpen */
+    xDelete,                /* xDelete */
+    xAccess,                /* xAccess */
+    xFullPathname,          /* xFullPathname */
+    xDlOpen,                /* xDlOpen */
+    xDlError,               /* xDlError */
+    xDlSym,                 /* xDlSym */
+    xDlClose,               /* xDlClose */
+    xRandomness,            /* xRandomness */
+    xSleep,                 /* xSleep */
+    xCurrentTime,           /* xCurrentTime */
+    xGetLastError,          /* xGetLastError */
+    xCurrentTimeInt64       /* xCurrentTimeInt64 */
 };
 
 }  // namespace
@@ -358,7 +362,8 @@ absl::Status RegisterAppendOnlyVfs() {
     return absl::InternalError("Failed to find default SQLite VFS");
   }
   g_append_only_vfs.mxPathname = g_default_vfs->mxPathname;
-  g_append_only_vfs.szOsFile = std::max(static_cast<int>(sizeof(AppendOnlyFile)), g_default_vfs->szOsFile);
+  g_append_only_vfs.szOsFile = std::max(
+      static_cast<int>(sizeof(AppendOnlyFile)), g_default_vfs->szOsFile);
   int rc = sqlite3_vfs_register(&g_append_only_vfs, 0);
   if (rc != SQLITE_OK) {
     return absl::InternalError("Failed to register appendonly VFS");
