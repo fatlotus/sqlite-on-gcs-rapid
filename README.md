@@ -92,16 +92,9 @@ Zonal buckets reside in a single availability zone and utilize the **Rapid** sto
 ```bash
 gcloud storage buckets create gs://my-sqlite-rapid-bucket \
     --location=us-east4-a \
+    --default-storage-class=RAPID \
     --uniform-bucket-level-access \
     --enable-hierarchical-namespace
 ```
-*(Note: Zonal / Rapid buckets are currently in preview and require whitelisting on your GCP project. If your project is not whitelisted, the command will return a 400 Location Constraint error.)*
+*(Note: Zonal / Rapid buckets are currently in preview and require whitelisting on your GCP project. If your project is not whitelisted, the command will return a 400 Location Constraint error. Only GCS Rapid zonal buckets support the **Appendable Object** feature; standard regional or multi-regional buckets do not support appends and cannot be used as a fallback for this VFS.)*
 
-### Fallback: Standard Hierarchical Namespace Bucket
-If your GCP project is not yet whitelisted for GCS Rapid buckets, you can use standard regional buckets with hierarchical namespaces enabled:
-```bash
-gcloud storage buckets create gs://my-sqlite-standard-bucket \
-    --location=us-east4 \
-    --uniform-bucket-level-access \
-    --enable-hierarchical-namespace
-```
