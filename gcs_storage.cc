@@ -12,6 +12,7 @@
 #include "google/cloud/storage/grpc_plugin.h"
 
 namespace sqlite {
+namespace gc = ::google::cloud;
 namespace gcs = ::google::cloud::storage;
 
 namespace {
@@ -163,57 +164,46 @@ absl::StatusOr<std::unique_ptr<GcsRapidStorage>> GcsRapidStorage::Create(
     return status;
   }
 
-  std::pair<gcs::AsyncWriter, gcs::AsyncToken> pair;
+  gc::future<gc::StatusOr<std::pair<gcs::AsyncWriter, gcs::AsyncToken>>>
+      write_future;
   if (metadata) {
     LOG(INFO)
         << "GcsRapidStorage::Create: calling ResumeAppendableObjectUpload";
-    auto future = async_client->ResumeAppendableObjectUpload(
+    write_future = async_client->ResumeAppendableObjectUpload(
         gcs::BucketName(bucket), object, metadata->generation());
-    future.wait();
-    auto result_or = future.get();
-    LOG(INFO)
-        << "GcsRapidStorage::Create: ResumeAppendableObjectUpload returned";
-    if (!result_or.ok()) {
-      auto status =
-          absl::Status(ConvertStatus(result_or.status()).code(),
-                       absl::StrFormat("Failed to resume appendable upload for "
-                                       "bucket=%s object=%s generation=%d: %s",
-                                       bucket, object, metadata->generation(),
-                                       result_or.status().message()));
-      LOG(ERROR) << "GcsRapidStorage::Create end: error=" << status.message();
-      return status;
-    }
-    pair = std::move(result_or.value());
   } else {
     LOG(INFO) << "GcsRapidStorage::Create: calling StartAppendableObjectUpload";
-    auto future = async_client->StartAppendableObjectUpload(
+    write_future = async_client->StartAppendableObjectUpload(
         gcs::BucketName(bucket), object);
-    future.wait();
-    auto result_or = future.get();
-    LOG(INFO)
-        << "GcsRapidStorage::Create: StartAppendableObjectUpload returned";
-    if (!result_or.ok()) {
-      auto status = absl::Status(
-          ConvertStatus(result_or.status()).code(),
-          absl::StrFormat(
-              "Failed to start appendable upload for bucket=%s object=%s: %s",
-              bucket, object, result_or.status().message()));
-      LOG(ERROR) << "GcsRapidStorage::Create end: error=" << status.message();
-      return status;
-    }
-    pair = std::move(result_or.value());
   }
 
+  LOG(INFO) << "GcsRapidStorage::Create: calling Open descriptor";
+  auto desc_future = async_client->Open(gcs::BucketName(bucket), object);
+
+  LOG(INFO) << "GcsRapidStorage::Create: waiting for write upload";
+  write_future.wait();
+  auto write_open_result = write_future.get();
+  if (!write_open_result.ok()) {
+    auto status =
+        absl::Status(ConvertStatus(write_open_result.status()).code(),
+                     absl::StrFormat("Failed to resume appendable upload for "
+                                     "bucket=%s object=%s generation=%d: %s",
+                                     bucket, object, metadata->generation(),
+                                     write_open_result.status().message()));
+    LOG(ERROR) << "GcsRapidStorage::Create end: error=" << status.message();
+    return status;
+  }
+  auto [writer, token] = std::move(*write_open_result);
+
   // Get the size of the (potentially unfinalized) object
-  auto const& state = pair.first.PersistedState();
+  auto const& state = writer.PersistedState();
   if (std::holds_alternative<google::storage::v2::Object>(state)) {
     initial_offset = std::get<google::storage::v2::Object>(state).size();
   } else if (std::holds_alternative<std::int64_t>(state)) {
     initial_offset = std::get<std::int64_t>(state);
   }
 
-  LOG(INFO) << "GcsRapidStorage::Create: calling Open descriptor";
-  auto desc_future = async_client->Open(gcs::BucketName(bucket), object);
+  LOG(INFO) << "GcsRapidStorage::Create: waiting for open descriptor";
   desc_future.wait();
   auto desc_or = desc_future.get();
   LOG(INFO) << "GcsRapidStorage::Create: Open descriptor returned";
@@ -229,8 +219,8 @@ absl::StatusOr<std::unique_ptr<GcsRapidStorage>> GcsRapidStorage::Create(
 
   LOG(INFO) << "GcsRapidStorage::Create end: success";
   return std::unique_ptr<GcsRapidStorage>(new GcsRapidStorage(
-      std::move(async_client), bucket, object, std::move(pair.first),
-      std::move(pair.second), std::move(desc_or.value()), initial_offset));
+      std::move(async_client), bucket, object, std::move(writer),
+      std::move(token), std::move(*desc_or), initial_offset));
 }
 
 absl::StatusOr<int64_t> GcsRapidStorage::Append(const uint8_t* data,
