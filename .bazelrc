@@ -15,3 +15,8 @@ build --host_action_env=DEVELOPER_DIR
 build --cxxopt=-std=c++20
 build --host_cxxopt=-std=c++20
 
+# Speed up build by compiling host tools in fastbuild mode instead of opt mode
+build --host_compilation_mode=fastbuild
+
+# Enable disk caching to persist build artifacts across builds
+build --disk_cache=/Users/jeremyarcher/.cache/bazel-disk-cache
