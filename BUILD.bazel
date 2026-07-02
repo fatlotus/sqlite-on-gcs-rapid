@@ -143,6 +143,47 @@ cc_binary(
     ],
 )
 
+cc_library(
+    name = "compactor_lib",
+    srcs = ["compactor.cc"],
+    hdrs = ["compactor.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block_mapper",
+        ":local_storage",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@google_cloud_cpp//:storage_grpc",
+    ],
+)
+
+cc_binary(
+    name = "compactor",
+    srcs = ["compactor_main.cc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":compactor_lib",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:initialize",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+cc_test(
+    name = "compactor_test",
+    srcs = ["compactor_test.cc"],
+    deps = [
+        ":compactor_lib",
+        ":local_storage",
+        ":block_mapper",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+
 sh_test(
     name = "e2e_shell_test",
     srcs = ["e2e_shell_test.sh"],
