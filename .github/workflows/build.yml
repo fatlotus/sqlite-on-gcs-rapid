@@ -39,45 +39,6 @@ jobs:
           name: libsqlite3_gcsvfs-linux-x86_64
           path: bazel-bin/libsqlite3_gcsvfs.so
 
-  build-linux-32:
-    name: Build 32-bit Linux (x86)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install multilib tools
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y gcc-multilib g++-multilib libc6-dev:i386
-
-      - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.19.0
-        with:
-          bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
-          repository-cache: true
-
-      - name: Install Bazel (fallback for act)
-        run: |
-          if ! command -v bazel &> /dev/null; then
-            echo "Bazel not found. Installing Bazelisk..."
-            sudo curl -Lo /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 || curl -Lo /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
-            sudo chmod +x /usr/local/bin/bazel || chmod +x /usr/local/bin/bazel
-          fi
-
-      - name: Build shared library (32-bit)
-        run: |
-          bazel build //:libsqlite3_gcsvfs.so \
-            --copt=-m32 --linkopt=-m32 --cxxopt=-m32
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: libsqlite3_gcsvfs-linux-i686
-          path: bazel-bin/libsqlite3_gcsvfs.so
-
   build-macos-arm:
     name: Build ARM macOS (arm64)
     runs-on: macos-latest
