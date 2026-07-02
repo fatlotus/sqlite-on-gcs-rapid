@@ -39,20 +39,7 @@ jobs:
             --features=-layering_check \
             --features=-use_header_modules \
             --features=-module_maps \
-            --disk_cache=.cache/bazel-disk-cache > build_log.txt 2>&1
-
-      - name: Push failure log to git
-        if: failure()
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git checkout -b build-failure-log-linux
-          if [ -f build_log.txt ]; then
-            git add build_log.txt
-            git commit -m "ci: add build failure log for linux 64-bit"
-            git push origin build-failure-log-linux --force
-          fi
-          exit 1
+            --disk_cache=.cache/bazel-disk-cache
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -80,20 +67,7 @@ jobs:
             --features=-layering_check \
             --features=-use_header_modules \
             --features=-module_maps \
-            --disk_cache=.cache/bazel-disk-cache > build_log.txt 2>&1
-
-      - name: Push failure log to git
-        if: failure()
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git checkout -b build-failure-log-macos
-          if [ -f build_log.txt ]; then
-            git add build_log.txt
-            git commit -m "ci: add build failure log for macos"
-            git push origin build-failure-log-macos --force
-          fi
-          exit 1
+            --disk_cache=.cache/bazel-disk-cache
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
