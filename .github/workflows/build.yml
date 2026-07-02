@@ -31,7 +31,10 @@ jobs:
 
       - name: Build shared library
         run: |
-          bazel build //:libsqlite3_gcsvfs.so
+          bazel build //:libsqlite3_gcsvfs.so \
+            --features=-layering_check \
+            --features=-use_header_modules \
+            --features=-module_maps
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -55,7 +58,10 @@ jobs:
 
       - name: Build shared library
         run: |
-          bazel build //:libsqlite3_gcsvfs.so
+          bazel build //:libsqlite3_gcsvfs.so \
+            --features=-layering_check \
+            --features=-use_header_modules \
+            --features=-module_maps
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
