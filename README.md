@@ -81,8 +81,35 @@ SELECT * FROM test;
 
 When you exit, the connection writer completes and finalizes the upload stream, committing the database object to Google Cloud Storage.
 
+---
+
+## Database Compaction
+
+Because this VFS is append-only, every database page write adds a new record to the end of the physical file on GCS. Over time, as pages are modified, the file will contain outdated versions of blocks (garbage) and truncated block markers, leading to storage overhead and slower startup scan times.
+
+The **Compactor Tool** solves this by transactionally rewriting the file:
+1. It downloads the active database file (safeguarded by obtaining its current object generation).
+2. It runs a sequential recovery scan locally via the `BlockMapper` to reconstruct the block mapping, identifying only the latest active blocks.
+3. It transactionally streams only the active, valid blocks back to GCS.
+4. The write operation uses GCS preconditions (`If-Generation-Match`) to guarantee transactional safety: if the database has been modified during compaction, the upload fails and no data is lost.
+
+### Running the Compactor
+
+Ensure your environment is authenticated with Application Default Credentials (ADC).
+
+```bash
+# Build the compactor tool
+bazel build //:compactor
+
+# Option 1: Run against a GCS database object using its gs:// URI
+bazel run //:compactor -- gs://my-sqlite-rapid-bucket/db.sqlite
+
+# Option 2: Run by passing the bucket and object names separately
+bazel run //:compactor -- my-sqlite-rapid-bucket db.sqlite
+```
 
 ---
+
 
 ## GCS Bucket Creation
 
