@@ -11,9 +11,9 @@ build --host_features=-layering_check,-use_header_modules,-module_maps
 build --action_env=DEVELOPER_DIR
 build --host_action_env=DEVELOPER_DIR
 
-# Set C++20 standard
-build --cxxopt=-std=c++20
-build --host_cxxopt=-std=c++20
+# Set C++17 standard (to avoid C++20 strict template-id destructor errors in gRPC)
+build --cxxopt=-std=c++17
+build --host_cxxopt=-std=c++17
 
 # Speed up build by compiling host tools in fastbuild mode instead of opt mode
 build --host_compilation_mode=fastbuild
