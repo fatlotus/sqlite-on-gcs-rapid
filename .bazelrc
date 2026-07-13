@@ -20,3 +20,8 @@ build --host_compilation_mode=fastbuild
 
 # Enable disk caching to persist build artifacts across builds
 build --disk_cache=/Users/jeremyarcher/.cache/bazel-disk-cache
+
+# Optimize caching across different workspace paths (e.g. Git worktrees / subagents)
+build --features=oso_prefix_is_pwd
+build --experimental_output_paths=strip
+build --incompatible_strict_action_env
