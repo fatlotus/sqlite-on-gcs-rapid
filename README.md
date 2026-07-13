@@ -40,6 +40,53 @@ The compiled shared library will be located at `bazel-bin/libsqlite3_gcsvfs.so`.
 
 ---
 
+## Quick Start / Demo with Prebuilt Extension
+
+You can download and run a demo with the prebuilt extension directly without compiling from source.
+
+### 1. Download the Extension
+Use `curl` to download the appropriate prebuilt library from the [releases page](https://github.com/fatlotus/sqlite-on-gcs-rapid/releases/tag/v0.0.3):
+
+**On macOS (ARM64):**
+```bash
+curl -L -o libsqlite3_gcsvfs.dylib https://github.com/fatlotus/sqlite-on-gcs-rapid/releases/download/v0.0.3/libsqlite3_gcsvfs-macos-arm64.dylib
+```
+
+**On Linux (x86_64):**
+```bash
+curl -L -o libsqlite3_gcsvfs.so https://github.com/fatlotus/sqlite-on-gcs-rapid/releases/download/v0.0.3/libsqlite3_gcsvfs-linux-x86_64.so
+```
+
+> [!NOTE]
+> Mac OS will need to use the Homebrew cask version of sqlite3 in order to load an extension. The default system `sqlite3` disables loading external extensions for security.
+
+### 2. Run the Demo
+Launch the Homebrew-installed `sqlite3` shell and run the following commands to create and query a table using the `"appendonly"` VFS backend:
+
+```sql
+-- 1. Load the extension (omit the file extension; SQLite automatically appends .dylib or .so)
+.load ./libsqlite3_gcsvfs
+
+-- 2. Enable URI filename support
+PRAGMA uri = ON;
+
+-- 3. Open a local database file using the appendonly VFS
+.open file:demo.db?vfs=appendonly
+
+-- 4. Set page size to 4k (mandatory for the block mapper layer)
+PRAGMA page_size = 4096;
+
+-- 5. Create a table, insert records, and query
+CREATE TABLE demo_table(id INTEGER PRIMARY KEY, message TEXT);
+INSERT INTO demo_table (message) VALUES ('SQLite on GCS Rapid VFS!');
+SELECT * FROM demo_table;
+
+-- 6. Exit
+.exit
+```
+
+---
+
 ## Operating the VFS Extension with Vanilla SQLite3
 
 The built library is a standard SQLite3 loadable extension (https://sqlite.org/loadext.html). When loaded, it registers the `"appendonly"` VFS.
