@@ -33,19 +33,25 @@ jobs:
             sudo chmod +x /usr/local/bin/bazel || chmod +x /usr/local/bin/bazel
           fi
 
-      - name: Build shared library
+      - name: Build targets
         run: |
-          bazel build //:libsqlite3_gcsvfs.so \
+          bazel build //:libsqlite3_gcsvfs.so //:compactor \
             --features=-layering_check \
             --features=-use_header_modules \
             --features=-module_maps \
             --disk_cache=.cache/bazel-disk-cache
 
-      - name: Upload artifact
+      - name: Upload shared library artifact
         uses: actions/upload-artifact@v4
         with:
           name: libsqlite3_gcsvfs-linux-x86_64
           path: bazel-bin/libsqlite3_gcsvfs.so
+
+      - name: Upload compactor artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compactor-linux-x86_64
+          path: bazel-bin/compactor
 
   build-macos-arm:
     name: Build ARM macOS (arm64)
@@ -61,19 +67,25 @@ jobs:
           disk-cache: ${{ github.workflow }}
           repository-cache: true
 
-      - name: Build shared library
+      - name: Build targets
         run: |
-          bazel build //:libsqlite3_gcsvfs.so \
+          bazel build //:libsqlite3_gcsvfs.so //:compactor \
             --features=-layering_check \
             --features=-use_header_modules \
             --features=-module_maps \
             --disk_cache=.cache/bazel-disk-cache
 
-      - name: Upload artifact
+      - name: Upload shared library artifact
         uses: actions/upload-artifact@v4
         with:
           name: libsqlite3_gcsvfs-macos-arm64
           path: bazel-bin/libsqlite3_gcsvfs.so
+
+      - name: Upload compactor artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compactor-macos-arm64
+          path: bazel-bin/compactor
 
   release:
     name: Create GitHub Release
@@ -96,12 +108,26 @@ jobs:
           name: libsqlite3_gcsvfs-macos-arm64
           path: ./artifacts/macos
 
+      - name: Download Linux compactor artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: compactor-linux-x86_64
+          path: ./artifacts/linux-compactor
+
+      - name: Download macOS compactor artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: compactor-macos-arm64
+          path: ./artifacts/macos-compactor
+
       - name: Prepare assets
         run: |
           mkdir -p release-assets
           cp ./artifacts/linux/libsqlite3_gcsvfs.so release-assets/libsqlite3_gcsvfs-linux-x86_64.so
           cp ./artifacts/macos/libsqlite3_gcsvfs.so release-assets/libsqlite3_gcsvfs-macos-arm64.so
           cp ./artifacts/macos/libsqlite3_gcsvfs.so release-assets/libsqlite3_gcsvfs-macos-arm64.dylib
+          cp ./artifacts/linux-compactor/compactor release-assets/compactor-linux-x86_64
+          cp ./artifacts/macos-compactor/compactor release-assets/compactor-macos-arm64
 
       - name: Create Release
         env:

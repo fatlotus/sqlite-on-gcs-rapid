@@ -162,6 +162,10 @@ cc_binary(
     name = "compactor",
     srcs = ["compactor_main.cc"],
     visibility = ["//visibility:public"],
+    linkopts = select({
+        "@platforms//os:linux": ["-static-libstdc++", "-static-libgcc"],
+        "//conditions:default": [],
+    }),
     deps = [
         ":compactor_lib",
         "@abseil-cpp//absl/log",
