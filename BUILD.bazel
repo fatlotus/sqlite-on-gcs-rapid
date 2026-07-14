@@ -2,6 +2,7 @@ load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@rules_fuzzing//fuzzing:cc_defs.bzl", "cc_fuzz_test")
 
 cc_library(
     name = "storage",
@@ -264,3 +265,33 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_fuzz_test(
+    name = "log_format_fuzzer",
+    srcs = ["log_format_fuzzer.cc"],
+    deps = [
+        ":block_mapper",
+        ":local_storage",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:initialize",
+    ],
+)
+
+cc_binary(
+    name = "log_format_fuzzer_direct",
+    srcs = [
+        "log_format_fuzzer.cc",
+        "log_format_fuzzer_main.cc",
+    ],
+    copts = ["-fsanitize=address"],
+    linkopts = ["-fsanitize=address"],
+    deps = [
+        ":block_mapper",
+        ":local_storage",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:initialize",
+    ],
+)
+

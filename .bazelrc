@@ -25,3 +25,9 @@ build --disk_cache=/Users/jeremyarcher/.cache/bazel-disk-cache
 build --features=oso_prefix_is_pwd
 build --experimental_output_paths=strip
 build --incompatible_strict_action_env
+
+# rules_fuzzing configuration
+build:asan-libfuzzer --@rules_fuzzing//fuzzing:cc_engine=@rules_fuzzing//fuzzing/engines:libfuzzer
+build:asan-libfuzzer --@rules_fuzzing//fuzzing:cc_engine_instrumentation=libfuzzer
+build:asan-libfuzzer --@rules_fuzzing//fuzzing:cc_engine_sanitizer=asan
+
