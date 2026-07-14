@@ -105,6 +105,49 @@ cc_test(
 )
 
 cc_library(
+    name = "import_export",
+    srcs = ["import_export.cc"],
+    hdrs = ["import_export.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block_mapper",
+        ":storage",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+cc_binary(
+    name = "sqlite_log_tool",
+    srcs = ["sqlite_log_tool_main.cc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":import_export",
+        ":gcs_storage",
+        ":local_storage",
+        ":storage",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:initialize",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@google_cloud_cpp//:storage_grpc",
+    ],
+)
+
+cc_test(
+    name = "import_export_test",
+    srcs = ["import_export_test.cc"],
+    deps = [
+        ":import_export",
+        ":local_storage",
+        ":vfs_backend",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+        "@sqlite3//:sqlite3",
+    ],
+)
+
+cc_library(
     name = "vfs_backend",
     srcs = ["vfs_backend.cc"],
     hdrs = ["vfs_backend.h"],
