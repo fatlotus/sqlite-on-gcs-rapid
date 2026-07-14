@@ -22,7 +22,7 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
+          disk-cache: ${{ github.workflow }}-${{ runner.os }}-${{ runner.arch }}
           repository-cache: true
 
       - name: Install Bazel (fallback for act)
@@ -63,7 +63,7 @@ jobs:
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
+          disk-cache: ${{ github.workflow }}-${{ runner.os }}-${{ runner.arch }}
           repository-cache: true
 
       - name: Build targets
