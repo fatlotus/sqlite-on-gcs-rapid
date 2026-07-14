@@ -159,6 +159,35 @@ bazel run //:compactor -- my-sqlite-rapid-bucket db.sqlite
 
 ---
 
+## Log Import/Export CLI Tool
+
+Because the append-only VFS format wraps the database in a custom record layout (4105-byte blocks), you cannot directly read the log-formatted database using standard, unmodified `sqlite3` without our VFS extension loaded.
+
+The **Import/Export Tool** (`sqlite_log_tool`) allows you to easily convert between vanilla SQLite databases and our log-formatted append-only database format (which can be stored locally or on GCS).
+
+### Features
+*   **Import**: Converts a raw, standard SQLite database file into a log-formatted file. This is useful for migrating or uploading a standard database to GCS in an append-only, log-structured format.
+*   **Export**: Reconstructs a standard, raw SQLite database file from a log-formatted file. The resulting database can then be opened by vanilla `sqlite3` or any other SQLite interface directly.
+
+### Running the Tool
+
+```bash
+# Build the tool
+bazel build //:sqlite_log_tool
+
+# Export a log-formatted database (local or GCS) back to a raw database:
+bazel-bin/sqlite_log_tool export gcs://my-sqlite-rapid-bucket/db.sqlite /path/to/local/raw.db
+# Or from a local log:
+bazel-bin/sqlite_log_tool export /path/to/local/log.db /path/to/local/raw.db
+
+# Import a standard raw database into a log-formatted database (local or GCS):
+bazel-bin/sqlite_log_tool import /path/to/local/raw.db gcs://my-sqlite-rapid-bucket/db.sqlite
+# Or into a local log:
+bazel-bin/sqlite_log_tool import /path/to/local/raw.db /path/to/local/log.db
+```
+
+---
+
 
 ## GCS Bucket Creation
 

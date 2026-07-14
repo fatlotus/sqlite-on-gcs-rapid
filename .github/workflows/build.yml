@@ -34,7 +34,7 @@ jobs:
 
       - name: Build targets
         run: |
-          bazel build //:libsqlite3_gcsvfs.so //:compactor \
+          bazel build //:libsqlite3_gcsvfs.so //:compactor //:sqlite_log_tool \
             --features=-layering_check \
             --features=-use_header_modules \
             --features=-module_maps
@@ -50,6 +50,12 @@ jobs:
         with:
           name: compactor-linux-x86_64
           path: bazel-bin/compactor
+
+      - name: Upload sqlite_log_tool artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite_log_tool-linux-x86_64
+          path: bazel-bin/sqlite_log_tool
 
   build-macos-arm:
     name: Build ARM macOS (arm64)
@@ -67,7 +73,7 @@ jobs:
 
       - name: Build targets
         run: |
-          bazel build //:libsqlite3_gcsvfs.so //:compactor \
+          bazel build //:libsqlite3_gcsvfs.so //:compactor //:sqlite_log_tool \
             --features=-layering_check \
             --features=-use_header_modules \
             --features=-module_maps
@@ -83,6 +89,12 @@ jobs:
         with:
           name: compactor-macos-arm64
           path: bazel-bin/compactor
+
+      - name: Upload sqlite_log_tool artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite_log_tool-macos-arm64
+          path: bazel-bin/sqlite_log_tool
 
   release:
     name: Create GitHub Release
@@ -123,6 +135,18 @@ jobs:
           name: compactor-macos-arm64
           path: ./artifacts/macos-compactor
 
+      - name: Download Linux sqlite_log_tool artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sqlite_log_tool-linux-x86_64
+          path: ./artifacts/linux-sqlite_log_tool
+
+      - name: Download macOS sqlite_log_tool artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sqlite_log_tool-macos-arm64
+          path: ./artifacts/macos-sqlite_log_tool
+
       - name: Prepare assets
         run: |
           mkdir -p release-assets
@@ -131,6 +155,8 @@ jobs:
           cp ./artifacts/macos/libsqlite3_gcsvfs.so release-assets/libsqlite3_gcsvfs-macos-arm64.dylib
           cp ./artifacts/linux-compactor/compactor release-assets/compactor-linux-x86_64
           cp ./artifacts/macos-compactor/compactor release-assets/compactor-macos-arm64
+          cp ./artifacts/linux-sqlite_log_tool/sqlite_log_tool release-assets/sqlite_log_tool-linux-x86_64
+          cp ./artifacts/macos-sqlite_log_tool/sqlite_log_tool release-assets/sqlite_log_tool-macos-arm64
 
       - name: Create Release
         env:
@@ -172,6 +198,22 @@ jobs:
           INSERT INTO demo_table (message) VALUES ('SQLite VFS loaded successfully!');
           SELECT * FROM demo_table;
           .exit
+          ```
+
+          ### Log Import/Export CLI Tool
+
+          To download the `sqlite_log_tool` import/export CLI:
+
+          **macOS (Apple Silicon arm64):**
+          ```bash
+          curl -L -o sqlite_log_tool https://github.com/fatlotus/sqlite-on-gcs-rapid/releases/download/${{ steps.version.outputs.version }}/sqlite_log_tool-macos-arm64
+          chmod +x sqlite_log_tool
+          ```
+
+          **Linux (x86_64):**
+          ```bash
+          curl -L -o sqlite_log_tool https://github.com/fatlotus/sqlite-on-gcs-rapid/releases/download/${{ steps.version.outputs.version }}/sqlite_log_tool-linux-x86_64
+          chmod +x sqlite_log_tool
           ```
           EOF
 
