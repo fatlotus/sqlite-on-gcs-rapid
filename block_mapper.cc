@@ -102,6 +102,10 @@ absl::Status BlockMapper::Init() {
 
 absl::Status BlockMapper::Read(uint8_t* buf, size_t size,
                                int64_t logical_offset) {
+  if (logical_offset < 0 || logical_offset > 1000000LL * 4096 ||
+      size > 1000000LL * 4096 - logical_offset) {
+    return absl::InvalidArgumentError("Read offset/size is out of range");
+  }
   std::shared_lock<std::shared_mutex> lock(mutex_);
   if (!initialized_) {
     return absl::FailedPreconditionError("BlockMapper not initialized");
@@ -162,8 +166,9 @@ absl::Status BlockMapper::ReadLocked(uint8_t* buf, size_t size,
 
 absl::Status BlockMapper::Write(const uint8_t* buf, size_t size,
                                 int64_t logical_offset) {
-  if (logical_offset < 0) {
-    return absl::InvalidArgumentError("logical_offset cannot be negative");
+  if (logical_offset < 0 || logical_offset > 1000000LL * 4096 ||
+      size > 1000000LL * 4096 - logical_offset) {
+    return absl::InvalidArgumentError("Write offset/size is out of range");
   }
   std::unique_lock<std::shared_mutex> lock(mutex_);
   if (!initialized_) {
