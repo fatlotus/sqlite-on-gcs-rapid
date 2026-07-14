@@ -81,21 +81,15 @@ Launch the Homebrew-installed `sqlite3` shell and run the following commands to 
 -- 1. Load the extension (omit the file extension; SQLite automatically appends .dylib or .so)
 .load ./libsqlite3_gcsvfs
 
--- 2. Enable URI filename support
-PRAGMA uri = ON;
-
--- 3. Open a local database file using the appendonly VFS
+-- 2. Open a local database file using the appendonly VFS
 .open file:demo.db?vfs=appendonly
 
--- 4. Set page size to 4k (mandatory for the block mapper layer)
-PRAGMA page_size = 4096;
-
--- 5. Create a table, insert records, and query
+-- 3. Create a table, insert records, and query
 CREATE TABLE demo_table(id INTEGER PRIMARY KEY, message TEXT);
 INSERT INTO demo_table (message) VALUES ('SQLite on GCS Rapid VFS!');
 SELECT * FROM demo_table;
 
--- 6. Exit
+-- 4. Exit
 .exit
 ```
 
@@ -124,16 +118,10 @@ Inside the interactive prompt:
 -- 1. Load the extension
 .load bazel-bin/libsqlite3_gcsvfs.so
 
--- 2. Enable URI filename support
-PRAGMA uri = ON;
-
--- 3. Open the database using the GCS URI filename and specify the VFS
+-- 2. Open the database using the GCS URI filename and specify the VFS
 .open file:gcs://my-sqlite-rapid-bucket/db.sqlite?vfs=appendonly
 
--- 4. Set page size to 4k (mandatory for the block mapper layer)
-PRAGMA page_size = 4096;
-
--- 5. Standard SQL operations
+-- 3. Standard SQL operations
 CREATE TABLE test(val TEXT);
 INSERT INTO test VALUES ('GCS C++ SDK');
 SELECT * FROM test;
