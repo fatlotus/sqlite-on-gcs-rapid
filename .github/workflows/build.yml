@@ -3,7 +3,6 @@ name: Build SQLite VFS Extension
 on:
   push:
     branches: [ "**" ]
-    tags: [ "v*" ]
   pull_request:
     branches: [ "**" ]
 
@@ -89,10 +88,16 @@ jobs:
     name: Create GitHub Release
     needs: [build-linux-64, build-macos-arm]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Generate release version
+        id: version
+        run: |
+          VERSION="v0.$(date -u +'%Y%m%d%H%M%S')"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Download Linux artifact
         uses: actions/download-artifact@v4
@@ -140,12 +145,12 @@ jobs:
 
           **macOS (Apple Silicon arm64):**
           ```bash
-          curl -L -o libsqlite3_gcsvfs.dylib https://github.com/fatlotus/sqlite-on-gcs-rapid/releases/download/${{ github.ref_name }}/libsqlite3_gcsvfs-macos-arm64.dylib
+          curl -L -o libsqlite3_gcsvfs.dylib https://github.com/fatlotus/sqlite-on-gcs-rapid/releases/download/${{ steps.version.outputs.version }}/libsqlite3_gcsvfs-macos-arm64.dylib
           ```
 
           **Linux (x86_64):**
           ```bash
-          curl -L -o libsqlite3_gcsvfs.so https://github.com/fatlotus/sqlite-on-gcs-rapid/releases/download/${{ github.ref_name }}/libsqlite3_gcsvfs-linux-x86_64.so
+          curl -L -o libsqlite3_gcsvfs.so https://github.com/fatlotus/sqlite-on-gcs-rapid/releases/download/${{ steps.version.outputs.version }}/libsqlite3_gcsvfs-linux-x86_64.so
           ```
 
           > [!NOTE]
@@ -170,8 +175,8 @@ jobs:
           ```
           EOF
 
-          gh release create ${{ github.ref_name }} \
-            --title "Release ${{ github.ref_name }}" \
+          gh release create ${{ steps.version.outputs.version }} \
+            --title "Release ${{ steps.version.outputs.version }}" \
             --notes-file release-notes.md \
             release-assets/*
 
