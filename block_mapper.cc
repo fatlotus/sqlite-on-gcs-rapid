@@ -84,7 +84,7 @@ absl::Status BlockMapper::Init() {
         }
         if (metadata.has_new_size()) {
           int64_t new_size = metadata.new_size();
-          if (new_size < 0) {
+          if (new_size < 0 || new_size > 1000000LL * 4096) {
             return absl::InternalError("Invalid size in MetadataBlock during recovery");
           }
           logical_size_ = new_size;
@@ -228,8 +228,8 @@ absl::Status BlockMapper::Write(const uint8_t* buf, size_t size,
 }
 
 absl::Status BlockMapper::Truncate(int64_t new_size) {
-  if (new_size < 0) {
-    return absl::InvalidArgumentError("new_size cannot be negative");
+  if (new_size < 0 || new_size > 1000000LL * 4096) {
+    return absl::InvalidArgumentError("new_size cannot be negative or exceed 4GB");
   }
   std::unique_lock<std::shared_mutex> lock(mutex_);
   if (!initialized_) {
