@@ -131,7 +131,47 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          cat << 'EOF' > release-notes.md
+          ### Usage Instructions
+
+          To use the `appendonly` VFS extension:
+
+          #### 1. Download the extension shared library for your platform:
+
+          **macOS (Apple Silicon arm64):**
+          ```bash
+          curl -L -o libsqlite3_gcsvfs.dylib https://github.com/fatlotus/sqlite-on-gcs-rapid/releases/download/${{ github.ref_name }}/libsqlite3_gcsvfs-macos-arm64.dylib
+          ```
+
+          **Linux (x86_64):**
+          ```bash
+          curl -L -o libsqlite3_gcsvfs.so https://github.com/fatlotus/sqlite-on-gcs-rapid/releases/download/${{ github.ref_name }}/libsqlite3_gcsvfs-linux-x86_64.so
+          ```
+
+          > [!NOTE]
+          > Mac OS will need to use the Homebrew cask version of sqlite3 in order to load an extension. The default system `sqlite3` disables loading external extensions for security.
+
+          #### 2. Run SQLite3 and load the VFS:
+
+          Make sure you run `sqlite3` (on macOS, you may need a Homebrew-installed version of `sqlite3` to allow loading extensions):
+
+          ```sql
+          -- Load the extension (omit the file extension)
+          .load ./libsqlite3_gcsvfs
+
+          -- Open a database file using the appendonly VFS
+          .open file:demo.db?vfs=appendonly
+
+          -- Perform SQL operations
+          CREATE TABLE demo_table(id INTEGER PRIMARY KEY, message TEXT);
+          INSERT INTO demo_table (message) VALUES ('SQLite VFS loaded successfully!');
+          SELECT * FROM demo_table;
+          .exit
+          ```
+          EOF
+
           gh release create ${{ github.ref_name }} \
             --title "Release ${{ github.ref_name }}" \
-            --notes "Automated release for version ${{ github.ref_name }}" \
+            --notes-file release-notes.md \
             release-assets/*
+
