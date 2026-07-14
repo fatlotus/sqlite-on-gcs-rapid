@@ -1,4 +1,6 @@
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 cc_library(
@@ -65,12 +67,23 @@ cc_test(
     ],
 )
 
+proto_library(
+    name = "metadata_proto",
+    srcs = ["metadata.proto"],
+)
+
+cc_proto_library(
+    name = "metadata_cc_proto",
+    deps = [":metadata_proto"],
+)
+
 cc_library(
     name = "block_mapper",
     srcs = ["block_mapper.cc"],
     hdrs = ["block_mapper.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":metadata_cc_proto",
         ":storage",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
@@ -80,6 +93,7 @@ cc_library(
 cc_test(
     name = "block_mapper_test",
     srcs = ["block_mapper_test.cc"],
+    data = ["testdata/format_v1.db"],
     deps = [
         ":block_mapper",
         ":local_storage",

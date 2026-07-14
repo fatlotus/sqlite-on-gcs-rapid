@@ -9,16 +9,30 @@ Because files are append-only, the backend translates random-access logical page
 ## Architecture & File Format
 
 The database file is represented as a sequence of **4105-byte records**:
-*   **Block Index** (`int64_t`, 8 bytes): The logical 4k block index (or `-1` to represent a truncate event).
-*   **Data** (`uint8_t[4096]`, 4096 bytes): The 4k database page payload.
+*   **Block Index** (`int64_t`, 8 bytes): The logical 4k block index (or `-1` to represent a metadata event).
+*   **Data** (`uint8_t[4096]`, 4096 bytes): The 4k database page payload (or a protocol buffer structure for metadata events).
 *   **Validity Flag** (`uint8_t`, 1 byte): `1` if the block is good/complete, or `0` if it is garbage/padding written to repair a partial block after a crash.
+
+### Metadata Block (`block_index == -1`)
+For metadata events (`block_index == -1`), the 4096-byte payload contains a protocol buffer payload with the following layout:
+*   **Proto Size** (`int64_t`, 8 bytes): The size of the serialized protocol buffer (stored at payload offset 0).
+*   **Proto Bytes** (`uint8_t[proto_size]`, `proto_size` bytes): The serialized `sqlite.MetadataBlock` protocol buffer bytes.
+*   **Padding** (`uint8_t[4088 - proto_size]`, zero-padded to fill out the remaining 4096-byte block payload).
+
+The `sqlite.MetadataBlock` protocol buffer contains the following fields:
+*   `new_size` (`int64`): If present, indicates a truncation of the logical database to the specified size.
 
 ### Crash Recovery Scan
 Upon opening a database:
 1.  The physical file size is verified. If the size is not a multiple of 4105 bytes, the trailing incomplete write is padded with garbage bytes (`is_good = 0`) to align subsequent appends.
 2.  The file is scanned sequentially from offset 0.
 3.  Each valid record (where `is_good == 1`) reconstructs the block mapping in an in-memory `std::vector<int64_t>`. Later records automatically overwrite previous mappings for the same block index.
-4.  Truncations (`block_index == -1`) prune out-of-bounds mappings and update the logical file size.
+4.  Metadata blocks (`block_index == -1`) parse the `sqlite.MetadataBlock` protocol buffer from the payload. If the `new_size` field is set, it prunes out-of-bounds mappings and updates the logical file size (truncation).
+
+### Forward & Backwards Compatibility
+To ensure that all prior revisions of the file format remain readable with new versions of the code:
+- Any future metadata or formatting change should check in a test database file demonstrating the changes.
+- Future changes to the file format should duplicate the corresponding backwards compatibility test (like `BackwardsCompatibleV1` in [block_mapper_test.cc](file:///Users/jeremyarcher/2026/05-May/sqlite/block_mapper_test.cc)) to ensure older formats remain readable by newer versions.
 
 ---
 

@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -243,6 +244,51 @@ TEST_F(BlockMapperTest, CrashRecovery) {
     ASSERT_TRUE(mapper->Read(r2.data(), r2.size(), 8192).ok());
     for (uint8_t v : r2) EXPECT_EQ(v, 9);
   }
+}
+
+TEST_F(BlockMapperTest, BackwardsCompatibleV1) {
+  std::string src_path = "testdata/format_v1.db";
+  std::string dst_path = GetTestFilePath() + "_v1_test.db";
+  unlink(dst_path.c_str());
+
+  {
+    std::ifstream src(src_path, std::ios::binary);
+    ASSERT_TRUE(src.is_open()) << "Failed to open source compatibility file: " << src_path;
+    std::ofstream dst(dst_path, std::ios::binary);
+    ASSERT_TRUE(dst.is_open()) << "Failed to open temporary destination file: " << dst_path;
+    dst << src.rdbuf();
+  }
+
+  {
+    auto storage_or = LocalStorage::Open(dst_path);
+    ASSERT_TRUE(storage_or.ok());
+    auto mapper = std::make_unique<BlockMapper>(std::move(storage_or.value()));
+    ASSERT_TRUE(mapper->Init().ok());
+
+    // Verify logical size recovered is 5000.
+    EXPECT_EQ(mapper->logical_size(), 5000);
+
+    // Verify block mappings.
+    EXPECT_TRUE(mapper->IsBlockMapped(0));
+    EXPECT_TRUE(mapper->IsBlockMapped(1));
+    EXPECT_FALSE(mapper->IsBlockMapped(2));
+
+    // Verify read data for block 0.
+    std::vector<uint8_t> r0(4096, 0);
+    ASSERT_TRUE(mapper->Read(r0.data(), r0.size(), 0).ok());
+    for (uint8_t v : r0) {
+      EXPECT_EQ(v, 'C');
+    }
+
+    // Verify read data for block 1.
+    std::vector<uint8_t> r1(4096, 0);
+    ASSERT_TRUE(mapper->Read(r1.data(), r1.size(), 4096).ok());
+    for (uint8_t v : r1) {
+      EXPECT_EQ(v, 'B');
+    }
+  }
+
+  unlink(dst_path.c_str());
 }
 
 }  // namespace

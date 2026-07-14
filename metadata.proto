@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+package sqlite;
+
+message MetadataBlock {
+  optional int64 new_size = 1;
+}

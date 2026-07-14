@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 #include <vector>
+
+#include "metadata.pb.h"
 
 namespace sqlite {
 
@@ -70,14 +73,24 @@ absl::Status BlockMapper::Init() {
         logical_to_physical_[block_index] = offset + 8;
         logical_size_ = std::max(logical_size_, (block_index + 1) * 4096);
       } else if (block_index == -1) {
-        int64_t new_size;
-        std::memcpy(&new_size, record_buf + 8, sizeof(new_size));
-        if (new_size < 0) {
-          return absl::InternalError("Invalid size during recovery");
+        int64_t proto_size;
+        std::memcpy(&proto_size, record_buf + 8, sizeof(proto_size));
+        if (proto_size < 0 || proto_size > 4088) {
+          return absl::InternalError("Invalid proto size during recovery");
         }
-        logical_size_ = new_size;
-        int64_t ceil_blocks = (new_size + 4095) / 4096;
-        logical_to_physical_.resize(ceil_blocks, -1);
+        MetadataBlock metadata;
+        if (!metadata.ParseFromArray(record_buf + 16, proto_size)) {
+          return absl::InternalError("Failed to parse MetadataBlock during recovery");
+        }
+        if (metadata.has_new_size()) {
+          int64_t new_size = metadata.new_size();
+          if (new_size < 0) {
+            return absl::InternalError("Invalid size in MetadataBlock during recovery");
+          }
+          logical_size_ = new_size;
+          int64_t ceil_blocks = (new_size + 4095) / 4096;
+          logical_to_physical_.resize(ceil_blocks, -1);
+        }
       }
     }
     offset += 4105;
@@ -223,12 +236,26 @@ absl::Status BlockMapper::Truncate(int64_t new_size) {
     return absl::FailedPreconditionError("BlockMapper not initialized");
   }
 
+  MetadataBlock metadata;
+  metadata.set_new_size(new_size);
+
+  std::string serialized;
+  if (!metadata.SerializeToString(&serialized)) {
+    return absl::InternalError("Failed to serialize MetadataBlock proto");
+  }
+  if (serialized.size() > 4088) {
+    return absl::InternalError("Serialized MetadataBlock exceeds maximum metadata payload size");
+  }
+
   // Construct a truncate record
   uint8_t record_buf[4105];
   int64_t block_index = -1;
   std::memcpy(record_buf, &block_index, sizeof(int64_t));
-  std::memcpy(record_buf + 8, &new_size, sizeof(int64_t));
-  std::memset(record_buf + 16, 0, 4088);
+  
+  int64_t proto_size = serialized.size();
+  std::memcpy(record_buf + 8, &proto_size, sizeof(proto_size));
+  std::memcpy(record_buf + 16, serialized.data(), proto_size);
+  std::memset(record_buf + 16 + proto_size, 0, 4088 - proto_size);
   record_buf[4104] = 1;  // is_good = 1
 
   auto append_res = storage_->Append(record_buf, 4105);
