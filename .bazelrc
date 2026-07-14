@@ -7,6 +7,9 @@ build --incompatible_autoload_externally=cc_library,cc_binary,cc_test,py_test,py
 build --features=-layering_check,-use_header_modules,-module_maps
 build --host_features=-layering_check,-use_header_modules,-module_maps
 
+# Target macOS 11.0 (Big Sur) minimum by default for macOS targets (earliest arm64 macOS release)
+build --macos_minimum_os=11.0
+
 # Propagate Xcode developer directory environment variable for hermetic compiler/SDK paths matching
 build --action_env=DEVELOPER_DIR
 build --host_action_env=DEVELOPER_DIR
