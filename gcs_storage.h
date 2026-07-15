@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 #include "absl/status/status.h"
@@ -22,7 +23,7 @@ class GcsRapidStorage : public AppendOnlyStorage {
       std::string bucket, std::string object,
       google::cloud::storage::AsyncWriter writer,
       google::cloud::storage::AsyncToken token,
-      google::cloud::storage::ObjectDescriptor descriptor,
+      std::optional<google::cloud::storage::ObjectDescriptor> descriptor,
       int64_t initial_offset);
 
   ~GcsRapidStorage() override;
@@ -44,7 +45,7 @@ class GcsRapidStorage : public AppendOnlyStorage {
   std::mutex mutex_;
   google::cloud::storage::AsyncWriter writer_;
   google::cloud::storage::AsyncToken token_;
-  google::cloud::storage::ObjectDescriptor descriptor_;
+  std::optional<google::cloud::storage::ObjectDescriptor> descriptor_;
   int64_t initial_offset_ = 0;
   int64_t file_length_ = 0;
   std::vector<uint8_t> buffer_;

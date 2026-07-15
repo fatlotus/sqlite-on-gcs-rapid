@@ -102,11 +102,10 @@ absl::StatusOr<std::vector<uint8_t>> ReadDescriptorRange(
 
 }  // namespace
 
-GcsRapidStorage::GcsRapidStorage(std::shared_ptr<gcs::AsyncClient> async_client,
-                                 std::string bucket, std::string object,
-                                 gcs::AsyncWriter writer, gcs::AsyncToken token,
-                                 gcs::ObjectDescriptor descriptor,
-                                 int64_t initial_offset)
+GcsRapidStorage::GcsRapidStorage(
+    std::shared_ptr<gcs::AsyncClient> async_client, std::string bucket,
+    std::string object, gcs::AsyncWriter writer, gcs::AsyncToken token,
+    std::optional<gcs::ObjectDescriptor> descriptor, int64_t initial_offset)
     : async_client_(std::move(async_client)),
       bucket_(std::move(bucket)),
       object_(std::move(object)),
@@ -177,9 +176,6 @@ absl::StatusOr<std::unique_ptr<GcsRapidStorage>> GcsRapidStorage::Create(
         gcs::BucketName(bucket), object);
   }
 
-  LOG(INFO) << "GcsRapidStorage::Create: calling Open descriptor";
-  auto desc_future = async_client->Open(gcs::BucketName(bucket), object);
-
   LOG(INFO) << "GcsRapidStorage::Create: waiting for write upload";
   write_future.wait();
   auto write_open_result = write_future.get();
@@ -203,24 +199,31 @@ absl::StatusOr<std::unique_ptr<GcsRapidStorage>> GcsRapidStorage::Create(
     initial_offset = std::get<std::int64_t>(state);
   }
 
-  LOG(INFO) << "GcsRapidStorage::Create: waiting for open descriptor";
-  desc_future.wait();
-  auto desc_or = desc_future.get();
-  LOG(INFO) << "GcsRapidStorage::Create: Open descriptor returned";
-  if (!desc_or.ok()) {
-    auto status = absl::Status(
-        ConvertStatus(desc_or.status()).code(),
-        absl::StrFormat(
-            "Failed to open GCS object descriptor for bucket=%s object=%s: %s",
-            bucket, object, desc_or.status().message()));
-    LOG(ERROR) << "GcsRapidStorage::Create end: error=" << status.message();
-    return status;
+  std::optional<gcs::ObjectDescriptor> descriptor = std::nullopt;
+  if (metadata) {
+    LOG(INFO) << "GcsRapidStorage::Create: calling Open descriptor";
+    auto desc_future = async_client->Open(gcs::BucketName(bucket), object);
+
+    LOG(INFO) << "GcsRapidStorage::Create: waiting for open descriptor";
+    desc_future.wait();
+    auto desc_or = desc_future.get();
+    LOG(INFO) << "GcsRapidStorage::Create: Open descriptor returned";
+    if (!desc_or.ok()) {
+      auto status = absl::Status(
+          ConvertStatus(desc_or.status()).code(),
+          absl::StrFormat(
+              "Failed to open GCS object descriptor for bucket=%s object=%s: %s",
+              bucket, object, desc_or.status().message()));
+      LOG(ERROR) << "GcsRapidStorage::Create end: error=" << status.message();
+      return status;
+    }
+    descriptor = std::move(*desc_or);
   }
 
   LOG(INFO) << "GcsRapidStorage::Create end: success";
   return std::unique_ptr<GcsRapidStorage>(new GcsRapidStorage(
       std::move(async_client), bucket, object, std::move(writer),
-      std::move(token), std::move(*desc_or), initial_offset));
+      std::move(token), std::move(descriptor), initial_offset));
 }
 
 absl::StatusOr<int64_t> GcsRapidStorage::Append(const uint8_t* data,
@@ -319,21 +322,29 @@ absl::StatusOr<size_t> GcsRapidStorage::PRead(uint8_t* buf, size_t size,
   while (true) {
     attempt++;
     int64_t current_desc_size = 0;
-    auto meta = descriptor_.metadata();
-    if (meta.has_value()) {
-      current_desc_size = meta->size();
+    if (descriptor_.has_value()) {
+      auto meta = descriptor_->metadata();
+      if (meta.has_value()) {
+        current_desc_size = meta->size();
+      }
     }
 
-    if (offset + gcs_read_size > current_desc_size || attempt > 1) {
+    if (!descriptor_.has_value() || offset + gcs_read_size > current_desc_size || attempt > 1) {
       auto desc_future = async_client_->Open(gcs::BucketName(bucket_), object_);
       desc_future.wait();
       auto desc_or = desc_future.get();
       if (desc_or.ok()) {
         descriptor_ = std::move(desc_or.value());
+      } else {
+        auto status = ConvertStatus(desc_or.status());
+        LOG(ERROR) << "GcsRapidStorage::PRead: Failed to open descriptor: " << status.message();
+        if (!descriptor_.has_value()) {
+          return status;
+        }
       }
     }
 
-    auto data_or = ReadDescriptorRange(descriptor_, offset, gcs_read_size);
+    auto data_or = ReadDescriptorRange(*descriptor_, offset, gcs_read_size);
 
     bool is_out_of_range = false;
     if (!data_or.ok()) {
