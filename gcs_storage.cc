@@ -125,7 +125,7 @@ GcsRapidStorage::~GcsRapidStorage() {
   bool has_writes = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    has_writes = (file_length_ > initial_offset_);
+    has_writes = has_local_writes_;
   }
   if (has_writes) {
     auto close_fut = writer_.Close();
@@ -235,6 +235,7 @@ absl::StatusOr<int64_t> GcsRapidStorage::Append(const uint8_t* data,
   if (size > 0 && data != nullptr) {
     buffer_.insert(buffer_.end(), data, data + size);
     file_length_ += size;
+    has_local_writes_ = true;
   }
 
   LOG(INFO) << "GcsRapidStorage::Append end: offset=" << write_offset
@@ -393,6 +394,86 @@ absl::StatusOr<int64_t> GcsRapidStorage::GetSize() {
   std::lock_guard<std::mutex> lock(mutex_);
   LOG(INFO) << "GcsRapidStorage::GetSize end: size=" << file_length_;
   return file_length_;
+}
+
+absl::Status GcsRapidStorage::Synchronize() {
+  LOG(INFO) << "GcsRapidStorage::Synchronize start";
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (!descriptor_.has_value()) {
+    auto desc_future = async_client_->Open(gcs::BucketName(bucket_), object_);
+    desc_future.wait();
+    auto desc_or = desc_future.get();
+    if (!desc_or.ok()) {
+      if (desc_or.status().code() == google::cloud::StatusCode::kNotFound) {
+        return absl::OkStatus();
+      }
+      return ConvertStatus(desc_or.status());
+    }
+    descriptor_ = std::move(*desc_or);
+    if (descriptor_.has_value()) {
+      auto meta = descriptor_->metadata();
+      if (meta.has_value()) {
+        file_length_ = std::max(file_length_, static_cast<int64_t>(meta->size()));
+      }
+    }
+    return absl::OkStatus();
+  }
+
+  int64_t current_offset = file_length_;
+  int64_t step_records = 1;
+  constexpr int64_t kRecordSize = 4105;
+
+  while (true) {
+    auto data_or = ReadDescriptorRange(*descriptor_, current_offset, step_records * kRecordSize);
+    if (data_or.ok()) {
+      if (data_or->size() == static_cast<size_t>(step_records * kRecordSize)) {
+        current_offset += step_records * kRecordSize;
+        step_records *= 2;
+      } else {
+        int64_t full_records = data_or->size() / kRecordSize;
+        current_offset += full_records * kRecordSize;
+        break;
+      }
+    } else {
+      if (data_or.status().code() != absl::StatusCode::kOutOfRange) {
+        return data_or.status();
+      }
+      if (step_records == 1) {
+        break;
+      }
+      int64_t low = current_offset;
+      int64_t high = current_offset + step_records * kRecordSize;
+      while (low + kRecordSize <= high) {
+        int64_t mid = low + ((high - low) / kRecordSize / 2) * kRecordSize;
+        auto mid_data_or = ReadDescriptorRange(*descriptor_, mid, kRecordSize);
+        if (mid_data_or.ok()) {
+          if (mid_data_or->size() == kRecordSize) {
+            low = mid + kRecordSize;
+          } else {
+            int64_t full_records = mid_data_or->size() / kRecordSize;
+            low = mid + full_records * kRecordSize;
+            high = low;
+          }
+        } else {
+          if (mid_data_or.status().code() != absl::StatusCode::kOutOfRange) {
+            return mid_data_or.status();
+          }
+          high = mid;
+        }
+      }
+      current_offset = low;
+      break;
+    }
+  }
+
+  if (current_offset > file_length_) {
+    LOG(INFO) << "GcsRapidStorage::Synchronize: updated size from " << file_length_
+              << " to " << current_offset;
+    file_length_ = current_offset;
+  }
+
+  return absl::OkStatus();
 }
 
 }  // namespace sqlite

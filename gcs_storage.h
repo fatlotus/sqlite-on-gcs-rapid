@@ -36,6 +36,7 @@ class GcsRapidStorage : public AppendOnlyStorage {
                                int64_t offset) override;
   absl::StatusOr<int64_t> GetSize() override;
   absl::Status Sync() override;
+  absl::Status Synchronize() override;
 
  private:
   std::shared_ptr<google::cloud::storage::AsyncClient> async_client_;
@@ -48,6 +49,7 @@ class GcsRapidStorage : public AppendOnlyStorage {
   std::optional<google::cloud::storage::ObjectDescriptor> descriptor_;
   int64_t initial_offset_ = 0;
   int64_t file_length_ = 0;
+  bool has_local_writes_ = false;
   std::vector<uint8_t> buffer_;
 };
 

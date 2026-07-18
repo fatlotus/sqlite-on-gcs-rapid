@@ -8,6 +8,7 @@ SQLITE_EXTENSION_INIT3
 #ifndef SQLITE_IOERR_DIRTY
 #define SQLITE_IOERR_DIRTY (SQLITE_IOERR | (36 << 8))
 #endif
+#include <pthread.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -67,6 +68,10 @@ class InMemoryStorage : public AppendOnlyStorage {
   }
 
   absl::Status Sync() override {
+    return absl::OkStatus();
+  }
+
+  absl::Status Synchronize() override {
     return absl::OkStatus();
   }
 
@@ -171,9 +176,25 @@ static int xFileSize(sqlite3_file* pFile, sqlite3_int64* pSize) {
   return SQLITE_OK;
 }
 
-static int xLock(sqlite3_file* pFile, int eLock) { return SQLITE_OK; }
+static int xLock(sqlite3_file* pFile, int eLock) {
+  auto* file = reinterpret_cast<AppendOnlyFile*>(pFile);
+  if (file->lock_level == SQLITE_LOCK_NONE && eLock >= SQLITE_LOCK_SHARED) {
+    if (file->mapper) {
+      absl::Status status = file->mapper->Synchronize();
+      if (!status.ok()) {
+        return SQLITE_IOERR_LOCK;
+      }
+    }
+  }
+  file->lock_level = eLock;
+  return SQLITE_OK;
+}
 
-static int xUnlock(sqlite3_file* pFile, int eLock) { return SQLITE_OK; }
+static int xUnlock(sqlite3_file* pFile, int eLock) {
+  auto* file = reinterpret_cast<AppendOnlyFile*>(pFile);
+  file->lock_level = eLock;
+  return SQLITE_OK;
+}
 
 static int xCheckReservedLock(sqlite3_file* pFile, int* pResOut) {
   *pResOut = 0;
@@ -269,6 +290,7 @@ static int xOpen(sqlite3_vfs* pVfs, const char* zName, sqlite3_file* pFile,
   auto* file = reinterpret_cast<AppendOnlyFile*>(pFile);
   new (&file->mapper) std::unique_ptr<BlockMapper>(std::move(mapper));
   new (&file->path) std::string(std::move(path));
+  file->lock_level = SQLITE_LOCK_NONE;
   file->base.pMethods = &g_append_only_io_methods;
 
   {
@@ -436,6 +458,17 @@ static sqlite3_vfs g_append_only_vfs = {
 }  // namespace
 
 absl::Status RegisterAppendOnlyVfs() {
+  pthread_atfork(nullptr, nullptr, []() {
+    {
+      std::lock_guard<std::mutex> lock(g_registry_mutex);
+      g_open_files.clear();
+    }
+    {
+      std::lock_guard<std::mutex> lock(g_journal_paths_mutex);
+      g_in_memory_journal_paths.clear();
+    }
+  });
+
   g_default_vfs = sqlite3_vfs_find(nullptr);
   if (!g_default_vfs) {
     return absl::InternalError("Failed to find default SQLite VFS");

@@ -118,4 +118,9 @@ absl::StatusOr<int64_t> LocalStorage::GetSize() {
   return static_cast<int64_t>(st.st_size);
 }
 
+absl::Status LocalStorage::Synchronize() {
+  LOG(INFO) << "LocalStorage::Synchronize called";
+  return absl::OkStatus();
+}
+
 }  // namespace sqlite

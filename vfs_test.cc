@@ -1,5 +1,7 @@
 #include <fcntl.h>
 #include <sqlite3.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cstdlib>
@@ -244,6 +246,78 @@ TEST_F(VfsTest, InMemoryJournalIntegration) {
   sqlite3_finalize(stmt);
 
   sqlite3_close(db);
+  unlink(db_path.c_str());
+}
+
+TEST_F(VfsTest, MultiProcessLeaseSynchronization) {
+  std::string db_path = GetTestFilePath("sync_local_integration_test.db");
+  unlink(db_path.c_str());
+  unlink((db_path + "-journal").c_str());
+
+  // 1. Parent opens database and creates schema
+  sqlite3* parent_db = nullptr;
+  int rc = sqlite3_open_v2(db_path.c_str(), &parent_db,
+                           SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "appendonly");
+  ASSERT_EQ(rc, SQLITE_OK);
+
+  ExecuteOrDie(parent_db, "PRAGMA page_size = 4096;");
+  ExecuteOrDie(parent_db, "CREATE TABLE sync_test (id INTEGER PRIMARY KEY, val TEXT);");
+  ExecuteOrDie(parent_db, "INSERT INTO sync_test (val) VALUES ('parent_init');");
+
+  // Read back to ensure parent caches the current DB state
+  sqlite3_stmt* stmt = nullptr;
+  rc = sqlite3_prepare_v2(parent_db, "SELECT val FROM sync_test ORDER BY id;", -1, &stmt, nullptr);
+  ASSERT_EQ(rc, SQLITE_OK);
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))), "parent_init");
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_DONE);
+  sqlite3_finalize(stmt);
+
+  // Fork child process to write concurrently
+  pid_t pid = fork();
+  ASSERT_GE(pid, 0);
+
+  if (pid == 0) {
+    // Child Process:
+    sqlite3* child_db = nullptr;
+    int child_rc = sqlite3_open_v2(db_path.c_str(), &child_db,
+                                   SQLITE_OPEN_READWRITE, "appendonly");
+    if (child_rc != SQLITE_OK) {
+      std::exit(1);
+    }
+
+    char* child_err = nullptr;
+    child_rc = sqlite3_exec(child_db, "INSERT INTO sync_test (val) VALUES ('child_write');", nullptr, nullptr, &child_err);
+    if (child_err) sqlite3_free(child_err);
+    if (child_rc != SQLITE_OK) {
+      std::exit(2);
+    }
+
+    sqlite3_close(child_db);
+    std::exit(0);
+  }
+
+  // Parent Process:
+  int status = 0;
+  pid_t waited = waitpid(pid, &status, 0);
+  ASSERT_EQ(waited, pid);
+  ASSERT_TRUE(WIFEXITED(status));
+  ASSERT_EQ(WEXITSTATUS(status), 0);
+
+  // Now, parent starts a new read transaction. It should synchronize and see the child's write!
+  rc = sqlite3_prepare_v2(parent_db, "SELECT val FROM sync_test ORDER BY id;", -1, &stmt, nullptr);
+  ASSERT_EQ(rc, SQLITE_OK) << sqlite3_errmsg(parent_db);
+
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))), "parent_init");
+
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))), "child_write");
+
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_DONE);
+  sqlite3_finalize(stmt);
+
+  sqlite3_close(parent_db);
   unlink(db_path.c_str());
 }
 

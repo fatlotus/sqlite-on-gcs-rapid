@@ -117,6 +117,7 @@ absl::Status BlockMapper::Init() {
   }
 
   // Apply the records forward to reconstruct logical state and mappings
+  int64_t last_committed_offset = 0;
   for (size_t i = 0; i < recovered_records.size(); ++i) {
     if (!applied[i]) {
       continue;
@@ -135,8 +136,12 @@ absl::Status BlockMapper::Init() {
         logical_to_physical_.resize(ceil_blocks, -1);
       }
     }
+    if (rec.is_good == 1) {
+      last_committed_offset = rec.offset + 4105;
+    }
   }
 
+  physical_offset_ = last_committed_offset;
   initialized_ = true;
   return absl::OkStatus();
 }
@@ -356,8 +361,156 @@ absl::Status BlockMapper::Sync() {
     }
   }
 
+  physical_offset_ += pending_records_.size() * 4105;
   pending_records_.clear();
   return storage_->Sync();
+}
+
+absl::Status BlockMapper::Synchronize() {
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  if (!initialized_) {
+    return absl::FailedPreconditionError("BlockMapper not initialized");
+  }
+
+  // 1. Call storage_->Synchronize() first to let the storage provider
+  // update its internal state (like fetching the new file size from GCS).
+  auto sync_status = storage_->Synchronize();
+  if (!sync_status.ok()) {
+    return sync_status;
+  }
+
+  // 2. Get the current physical size
+  auto size_or = storage_->GetSize();
+  if (!size_or.ok()) {
+    return size_or.status();
+  }
+  int64_t P = size_or.value();
+
+  // If there's no new data, we are done!
+  if (P <= physical_offset_) {
+    return absl::OkStatus();
+  }
+
+  // Check alignment
+  if (P % 4105 != 0) {
+    P = (P / 4105) * 4105;
+    if (P <= physical_offset_) {
+      return absl::OkStatus();
+    }
+  }
+
+  // 3. Scan the new records from physical_offset_ to P
+  struct RecoveredRecord {
+    int64_t offset;
+    int64_t block_index;
+    uint8_t is_good;
+    int64_t new_size;
+  };
+  std::vector<RecoveredRecord> new_records;
+
+  int64_t offset = physical_offset_;
+  while (offset < P) {
+    uint8_t record_buf[4105];
+    auto read_or = storage_->PRead(record_buf, 4105, offset);
+    if (!read_or.ok()) {
+      return read_or.status();
+    }
+    if (read_or.value() != 4105) {
+      break;
+    }
+
+    uint8_t is_good = record_buf[4104];
+    int64_t block_index = 0;
+    int64_t new_size = -1;
+
+    if (is_good == 1 || is_good == 2) {
+      std::memcpy(&block_index, record_buf, sizeof(block_index));
+      if (block_index < -1 || block_index >= 1000000) {
+        return absl::InternalError("Invalid block index during synchronization");
+      }
+
+      if (block_index == -1) {
+        int64_t proto_size;
+        std::memcpy(&proto_size, record_buf + 8, sizeof(proto_size));
+        if (proto_size < 0 || proto_size > 4088) {
+          return absl::InternalError("Invalid proto size during synchronization");
+        }
+        MetadataBlock metadata;
+        if (!metadata.ParseFromArray(record_buf + 16, proto_size)) {
+          return absl::InternalError("Failed to parse MetadataBlock during synchronization");
+        }
+        if (metadata.has_new_size()) {
+          new_size = metadata.new_size();
+          if (new_size < 0 || new_size > 1000000LL * 4096) {
+            return absl::InternalError("Invalid size in MetadataBlock during synchronization");
+          }
+        }
+      }
+    }
+
+    new_records.push_back({offset, block_index, is_good, new_size});
+    offset += 4105;
+  }
+
+  if (new_records.empty()) {
+    return absl::OkStatus();
+  }
+
+  // Find the last record with is_good == 1 (commit marker)
+  int64_t last_committed_idx = -1;
+  for (int64_t i = static_cast<int64_t>(new_records.size()) - 1; i >= 0; --i) {
+    if (new_records[i].is_good == 1) {
+      last_committed_idx = i;
+      break;
+    }
+  }
+
+  if (last_committed_idx == -1) {
+    // No committed transactions in the new records, do nothing.
+    return absl::OkStatus();
+  }
+
+  // 4. Backward pass on new_records[0 ... last_committed_idx]
+  std::vector<bool> applied(last_committed_idx + 1, false);
+  bool applied_next = true;
+  for (int64_t i = last_committed_idx; i >= 0; --i) {
+    if (new_records[i].is_good == 1) {
+      applied_next = true;
+    } else if (new_records[i].is_good == 0) {
+      applied_next = false;
+    } else if (new_records[i].is_good == 2) {
+      // remains applied_next
+    } else {
+      applied_next = false;
+    }
+    applied[i] = applied_next;
+  }
+
+  // 5. Apply the records forward
+  for (int64_t i = 0; i <= last_committed_idx; ++i) {
+    if (!applied[i]) {
+      continue;
+    }
+    const auto& rec = new_records[i];
+    if (rec.block_index >= 0) {
+      if (rec.block_index >= static_cast<int64_t>(logical_to_physical_.size())) {
+        logical_to_physical_.resize(rec.block_index + 1, -1);
+      }
+      logical_to_physical_[rec.block_index] = rec.offset + 8;
+      logical_size_ = std::max(logical_size_, (rec.block_index + 1) * 4096);
+    } else if (rec.block_index == -1) {
+      if (rec.new_size != -1) {
+        logical_size_ = rec.new_size;
+        int64_t ceil_blocks = (rec.new_size + 4095) / 4096;
+        logical_to_physical_.resize(ceil_blocks, -1);
+      }
+    }
+  }
+
+  // 6. Update physical_offset_ to the end of the last committed record
+  physical_offset_ = new_records[last_committed_idx].offset + 4105;
+
+  return absl::OkStatus();
 }
 
 }  // namespace sqlite

@@ -561,5 +561,158 @@ TEST(GcsRapidStorageTest, PReadFromNonExistentObjectThenCreated) {
   EXPECT_EQ(std::string(reinterpret_cast<char*>(buf), 5), "hello");
 }
 
+TEST(GcsRapidStorageTest, SynchronizeSuccess) {
+  auto mock_conn =
+      std::make_shared<google::cloud::storage_mocks::MockAsyncConnection>();
+  auto async_client =
+      std::make_shared<google::cloud::storage::AsyncClient>(mock_conn);
+
+  auto mock_writer_conn = std::make_unique<
+      google::cloud::storage_mocks::MockAsyncWriterConnection>();
+  auto* raw_writer_conn = mock_writer_conn.get();
+  google::cloud::storage::AsyncWriter writer(std::move(mock_writer_conn));
+  google::cloud::storage::AsyncToken token =
+      google::cloud::storage_internal::MakeAsyncToken(raw_writer_conn);
+
+  auto mock_desc_conn = std::make_shared<
+      google::cloud::storage_mocks::MockAsyncObjectDescriptorConnection>();
+
+  EXPECT_CALL(*mock_conn, options())
+      .Times(::testing::AnyNumber())
+      .WillRepeatedly(::testing::Return(google::cloud::Options{}));
+
+  // We expect a single Read call on the descriptor conn at offset 100 for 4105 bytes.
+  // It returns data of length 4105, which signals that the file has grown!
+  // Then it will double the step size and try reading 2 records (8210 bytes) at offset 4205.
+  // We mock that second read to return OutOfRange (to end the search).
+  auto* raw_desc_conn = mock_desc_conn.get();
+  EXPECT_CALL(
+      *raw_desc_conn,
+      Read(::testing::Field(&google::cloud::storage::
+                                ObjectDescriptorConnection::ReadParams::start,
+                            100)))
+      .WillOnce(::testing::Invoke([](google::cloud::storage::
+                                         ObjectDescriptorConnection::ReadParams
+                                             p) {
+        EXPECT_EQ(p.length, 4105);
+        auto mock_reader_conn = std::make_unique<
+            google::cloud::storage_mocks::MockAsyncReaderConnection>();
+        auto* raw_reader_conn = mock_reader_conn.get();
+
+        std::string response_data(4105, 'x');
+        google::cloud::storage::ReadPayload payload(
+            std::vector<std::string>{response_data});
+
+        EXPECT_CALL(*raw_reader_conn, Read())
+            .WillOnce(::testing::InvokeWithoutArgs([payload = std::move(
+                                                        payload)]() mutable {
+              return google::cloud::make_ready_future(
+                  google::cloud::storage::AsyncReaderConnection::ReadResponse(
+                      std::move(payload)));
+            }))
+            .WillOnce(::testing::InvokeWithoutArgs([]() {
+              return google::cloud::make_ready_future(
+                  google::cloud::storage::AsyncReaderConnection::ReadResponse(
+                      google::cloud::Status{}));
+            }));
+
+        return mock_reader_conn;
+      }));
+
+  EXPECT_CALL(
+      *raw_desc_conn,
+      Read(::testing::AllOf(
+          ::testing::Field(&google::cloud::storage::
+                               ObjectDescriptorConnection::ReadParams::start,
+                           4205),
+          ::testing::Field(&google::cloud::storage::
+                               ObjectDescriptorConnection::ReadParams::length,
+                           8210))))
+      .WillOnce(::testing::Invoke([](google::cloud::storage::
+                                         ObjectDescriptorConnection::ReadParams
+                                             p) {
+        auto mock_reader_conn = std::make_unique<
+            google::cloud::storage_mocks::MockAsyncReaderConnection>();
+        EXPECT_CALL(*mock_reader_conn, Read())
+            .WillOnce(::testing::InvokeWithoutArgs([]() {
+              return google::cloud::make_ready_future(
+                  google::cloud::storage::AsyncReaderConnection::
+                      ReadResponse(google::cloud::Status(
+                          google::cloud::StatusCode::kOutOfRange,
+                          "Out of range")));
+            }));
+        return mock_reader_conn;
+      }));
+
+  EXPECT_CALL(
+      *raw_desc_conn,
+      Read(::testing::AllOf(
+          ::testing::Field(&google::cloud::storage::
+                               ObjectDescriptorConnection::ReadParams::start,
+                           8310),
+          ::testing::Field(&google::cloud::storage::
+                               ObjectDescriptorConnection::ReadParams::length,
+                           4105))))
+      .WillOnce(::testing::Invoke([](google::cloud::storage::
+                                         ObjectDescriptorConnection::ReadParams
+                                             p) {
+        auto mock_reader_conn = std::make_unique<
+            google::cloud::storage_mocks::MockAsyncReaderConnection>();
+        EXPECT_CALL(*mock_reader_conn, Read())
+            .WillOnce(::testing::InvokeWithoutArgs([]() {
+              return google::cloud::make_ready_future(
+                  google::cloud::storage::AsyncReaderConnection::
+                      ReadResponse(google::cloud::Status(
+                          google::cloud::StatusCode::kOutOfRange,
+                          "Out of range")));
+            }));
+        return mock_reader_conn;
+      }));
+
+  EXPECT_CALL(
+      *raw_desc_conn,
+      Read(::testing::AllOf(
+          ::testing::Field(&google::cloud::storage::
+                               ObjectDescriptorConnection::ReadParams::start,
+                           4205),
+          ::testing::Field(&google::cloud::storage::
+                               ObjectDescriptorConnection::ReadParams::length,
+                           4105))))
+      .WillOnce(::testing::Invoke([](google::cloud::storage::
+                                         ObjectDescriptorConnection::ReadParams
+                                             p) {
+        auto mock_reader_conn = std::make_unique<
+            google::cloud::storage_mocks::MockAsyncReaderConnection>();
+        EXPECT_CALL(*mock_reader_conn, Read())
+            .WillOnce(::testing::InvokeWithoutArgs([]() {
+              return google::cloud::make_ready_future(
+                  google::cloud::storage::AsyncReaderConnection::
+                      ReadResponse(google::cloud::Status(
+                          google::cloud::StatusCode::kOutOfRange,
+                          "Out of range")));
+            }));
+        return mock_reader_conn;
+      }));
+
+  google::cloud::storage::ObjectDescriptor descriptor(mock_desc_conn);
+
+  GcsRapidStorage storage(async_client, "my-bucket", "my-object",
+                          std::move(writer), std::move(token),
+                          std::move(descriptor), 100);
+
+  // Initial size is 100.
+  auto size_res1 = storage.GetSize();
+  ASSERT_TRUE(size_res1.ok());
+  EXPECT_EQ(size_res1.value(), 100);
+
+  // Synchronize should query GCS using descriptor and update size to 100 + 4105 = 4205.
+  auto sync_res = storage.Synchronize();
+  ASSERT_TRUE(sync_res.ok()) << sync_res.message();
+
+  auto size_res2 = storage.GetSize();
+  ASSERT_TRUE(size_res2.ok());
+  EXPECT_EQ(size_res2.value(), 4205);
+}
+
 }  // namespace
 }  // namespace sqlite

@@ -20,6 +20,7 @@ class AppendOnlyStorage {
                                        int64_t offset) = 0;
   virtual absl::StatusOr<int64_t> GetSize() = 0;
   virtual absl::Status Sync() = 0;
+  virtual absl::Status Synchronize() = 0;
 };
 
 }  // namespace sqlite

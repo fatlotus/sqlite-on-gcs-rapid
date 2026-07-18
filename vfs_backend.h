@@ -15,6 +15,7 @@ struct AppendOnlyFile {
   sqlite3_file base;
   std::unique_ptr<BlockMapper> mapper;
   std::string path;
+  int lock_level;
 };
 
 absl::Status RegisterAppendOnlyVfs();

@@ -30,6 +30,7 @@ class LocalStorage : public AppendOnlyStorage {
                                int64_t offset) override;
   absl::StatusOr<int64_t> GetSize() override;
   absl::Status Sync() override;
+  absl::Status Synchronize() override;
 
  private:
   explicit LocalStorage(int fd);

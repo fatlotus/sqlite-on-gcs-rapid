@@ -35,6 +35,9 @@ class BlockMapper {
   // Sync delegating to storage.
   absl::Status Sync();
 
+  // Synchronize/incremental replay from storage.
+  absl::Status Synchronize();
+
   // Helper to get logical size.
   int64_t logical_size() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
@@ -74,6 +77,7 @@ class BlockMapper {
   std::vector<PendingRecord> pending_records_;
 
   int64_t logical_size_ = 0;
+  int64_t physical_offset_ = 0;
   bool initialized_ = false;
 };
 
