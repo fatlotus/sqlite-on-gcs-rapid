@@ -18,6 +18,7 @@ SQLITE_EXTENSION_INIT3
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "absl/status/status.h"
@@ -29,6 +30,54 @@ SQLITE_EXTENSION_INIT3
 namespace sqlite {
 
 namespace {
+
+class InMemoryStorage : public AppendOnlyStorage {
+ public:
+  InMemoryStorage() : size_(0) {}
+  ~InMemoryStorage() override = default;
+
+  absl::StatusOr<int64_t> Append(const uint8_t* data, size_t size) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    int64_t offset = size_;
+    if (size > 0 && data != nullptr) {
+      data_.insert(data_.end(), data, data + size);
+      size_ += size;
+    }
+    return offset;
+  }
+
+  absl::StatusOr<size_t> PRead(uint8_t* buf, size_t size,
+                               int64_t offset) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (offset < 0) {
+      return absl::InvalidArgumentError("Offset cannot be negative");
+    }
+    if (offset + size > static_cast<size_t>(size_)) {
+      return absl::OutOfRangeError("Attempted to read past EOF");
+    }
+    if (size > 0 && buf != nullptr) {
+      std::memcpy(buf, data_.data() + offset, size);
+    }
+    return size;
+  }
+
+  absl::StatusOr<int64_t> GetSize() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return size_;
+  }
+
+  absl::Status Sync() override {
+    return absl::OkStatus();
+  }
+
+ private:
+  std::mutex mutex_;
+  std::vector<uint8_t> data_;
+  int64_t size_;
+};
+
+std::mutex g_journal_paths_mutex;
+std::unordered_set<std::string> g_in_memory_journal_paths;
 
 sqlite3_vfs* g_default_vfs = nullptr;
 
@@ -159,13 +208,18 @@ static const sqlite3_io_methods g_append_only_io_methods = {
 
 static int xOpen(sqlite3_vfs* pVfs, const char* zName, sqlite3_file* pFile,
                  int flags, int* pOutFlags) {
+  if (flags & SQLITE_OPEN_WAL) {
+    return SQLITE_CANTOPEN;
+  }
   if (zName == nullptr) {
     return SQLITE_CANTOPEN;
   }
   std::string path(zName);
   bool is_gcs = (path.rfind("gcs://", 0) == 0);
+  bool is_journal = (flags & (SQLITE_OPEN_MAIN_JOURNAL | SQLITE_OPEN_TEMP_JOURNAL |
+                              SQLITE_OPEN_SUBJOURNAL | SQLITE_OPEN_SUPER_JOURNAL));
 
-  if (!is_gcs && !(flags & SQLITE_OPEN_MAIN_DB)) {
+  if (!is_gcs && !is_journal && !(flags & SQLITE_OPEN_MAIN_DB)) {
     return g_default_vfs->xOpen(g_default_vfs, zName, pFile, flags, pOutFlags);
   }
 
@@ -176,8 +230,15 @@ static int xOpen(sqlite3_vfs* pVfs, const char* zName, sqlite3_file* pFile,
     }
   }
 
+  if (is_journal) {
+    std::lock_guard<std::mutex> lock(g_journal_paths_mutex);
+    g_in_memory_journal_paths.insert(path);
+  }
+
   std::unique_ptr<AppendOnlyStorage> storage;
-  if (is_gcs) {
+  if (is_journal) {
+    storage = std::make_unique<InMemoryStorage>();
+  } else if (is_gcs) {
     std::string_view sub = std::string_view(path).substr(6);
     size_t first_slash = sub.find('/');
     if (first_slash == std::string_view::npos) {
@@ -226,6 +287,15 @@ static int xDelete(sqlite3_vfs* pVfs, const char* zName, int syncDir) {
     return SQLITE_IOERR_DELETE;
   }
   std::string path(zName);
+
+  {
+    std::lock_guard<std::mutex> lock(g_journal_paths_mutex);
+    if (g_in_memory_journal_paths.find(path) != g_in_memory_journal_paths.end()) {
+      g_in_memory_journal_paths.erase(path);
+      return SQLITE_OK;
+    }
+  }
+
   bool is_gcs = (path.rfind("gcs://", 0) == 0);
 
   if (is_gcs) {
@@ -255,6 +325,15 @@ static int xAccess(sqlite3_vfs* pVfs, const char* zName, int flags,
     return SQLITE_OK;
   }
   std::string path(zName);
+
+  {
+    std::lock_guard<std::mutex> lock(g_journal_paths_mutex);
+    if (g_in_memory_journal_paths.find(path) != g_in_memory_journal_paths.end()) {
+      *pResOut = 1;
+      return SQLITE_OK;
+    }
+  }
+
   bool is_gcs = (path.rfind("gcs://", 0) == 0);
 
   if (is_gcs) {

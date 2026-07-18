@@ -175,5 +175,77 @@ TEST_F(VfsTest, ConcurrentOpenReturnsBusy) {
   unlink(db_path.c_str());
 }
 
+TEST_F(VfsTest, RejectWalMode) {
+  std::string db_path = GetTestFilePath("wal_reject_test.db");
+  unlink(db_path.c_str());
+
+  sqlite3* db = nullptr;
+  int rc = sqlite3_open_v2(db_path.c_str(), &db,
+                           SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "appendonly");
+  ASSERT_EQ(rc, SQLITE_OK);
+
+  // Try to enable WAL mode
+  char* err_msg = nullptr;
+  rc = sqlite3_exec(db, "PRAGMA journal_mode = WAL;", nullptr, nullptr, &err_msg);
+  if (err_msg) {
+    sqlite3_free(err_msg);
+  }
+
+  // Check the active journal mode
+  sqlite3_stmt* stmt = nullptr;
+  rc = sqlite3_prepare_v2(db, "PRAGMA journal_mode;", -1, &stmt, nullptr);
+  ASSERT_EQ(rc, SQLITE_OK);
+  rc = sqlite3_step(stmt);
+  ASSERT_EQ(rc, SQLITE_ROW);
+  std::string mode = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+  sqlite3_finalize(stmt);
+
+  // WAL mode should not be the active mode because we rejected SQLITE_OPEN_WAL
+  EXPECT_NE(mode, "wal");
+
+  sqlite3_close(db);
+  unlink(db_path.c_str());
+}
+
+TEST_F(VfsTest, InMemoryJournalIntegration) {
+  std::string db_path = GetTestFilePath("in_memory_journal_test.db");
+  std::string journal_path = db_path + "-journal";
+  unlink(db_path.c_str());
+  unlink(journal_path.c_str());
+
+  sqlite3* db = nullptr;
+  int rc = sqlite3_open_v2(db_path.c_str(), &db,
+                           SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "appendonly");
+  ASSERT_EQ(rc, SQLITE_OK);
+
+  ExecuteOrDie(db, "PRAGMA page_size = 4096;");
+  ExecuteOrDie(db, "CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT);");
+
+  // Start a transaction and write some data
+  ExecuteOrDie(db, "BEGIN TRANSACTION;");
+  ExecuteOrDie(db, "INSERT INTO test (val) VALUES ('A'), ('B');");
+
+  // While transaction is active, a rollback journal is typically open.
+  // Verify that NO journal file exists on disk!
+  struct stat st;
+  int stat_rc = stat(journal_path.c_str(), &st);
+  EXPECT_NE(stat_rc, 0) << "Journal file should not be created on disk!";
+
+  ExecuteOrDie(db, "COMMIT;");
+
+  // Verify data reads back fine
+  sqlite3_stmt* stmt = nullptr;
+  rc = sqlite3_prepare_v2(db, "SELECT val FROM test ORDER BY id;", -1, &stmt, nullptr);
+  ASSERT_EQ(rc, SQLITE_OK);
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))), "A");
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))), "B");
+  sqlite3_finalize(stmt);
+
+  sqlite3_close(db);
+  unlink(db_path.c_str());
+}
+
 }  // namespace
 }  // namespace sqlite
