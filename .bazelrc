@@ -34,3 +34,7 @@ build:asan-libfuzzer --@rules_fuzzing//fuzzing:cc_engine=@rules_fuzzing//fuzzing
 build:asan-libfuzzer --@rules_fuzzing//fuzzing:cc_engine_instrumentation=libfuzzer
 build:asan-libfuzzer --@rules_fuzzing//fuzzing:cc_engine_sanitizer=asan
 
+# Propagate environment variables for local credentials/GCS tests
+test --test_env=HOME
+test --test_env=GOOGLE_APPLICATION_CREDENTIALS
+

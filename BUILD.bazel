@@ -259,6 +259,10 @@ cc_test(
     name = "gcs_integration_test",
     srcs = ["gcs_integration_test.cc"],
     data = [":libsqlite3_gcsvfs.so"],
+    tags = [
+        "no-sandbox",
+        "requires-network",
+    ],
     deps = [
         "@sqlite3//:sqlite3",
         "@googletest//:gtest",
