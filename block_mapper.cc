@@ -47,6 +47,14 @@ absl::Status BlockMapper::Init() {
   }
 
   // Scan storage in 4105-byte records
+  struct RecoveredRecord {
+    int64_t offset;
+    int64_t block_index;
+    uint8_t is_good;
+    int64_t new_size; // default to -1 if not metadata/truncate
+  };
+  std::vector<RecoveredRecord> recovered_records;
+
   int64_t offset = 0;
   while (offset < P) {
     uint8_t record_buf[4105];
@@ -60,19 +68,16 @@ absl::Status BlockMapper::Init() {
     }
 
     uint8_t is_good = record_buf[4104];
-    if (is_good == 1) {
-      int64_t block_index;
+    int64_t block_index = 0;
+    int64_t new_size = -1;
+
+    if (is_good == 1 || is_good == 2) {
       std::memcpy(&block_index, record_buf, sizeof(block_index));
       if (block_index < -1 || block_index >= 1000000) {
         return absl::InternalError("Invalid block index during recovery");
       }
-      if (block_index >= 0) {
-        if (block_index >= static_cast<int64_t>(logical_to_physical_.size())) {
-          logical_to_physical_.resize(block_index + 1, -1);
-        }
-        logical_to_physical_[block_index] = offset + 8;
-        logical_size_ = std::max(logical_size_, (block_index + 1) * 4096);
-      } else if (block_index == -1) {
+
+      if (block_index == -1) {
         int64_t proto_size;
         std::memcpy(&proto_size, record_buf + 8, sizeof(proto_size));
         if (proto_size < 0 || proto_size > 4088) {
@@ -83,17 +88,53 @@ absl::Status BlockMapper::Init() {
           return absl::InternalError("Failed to parse MetadataBlock during recovery");
         }
         if (metadata.has_new_size()) {
-          int64_t new_size = metadata.new_size();
+          new_size = metadata.new_size();
           if (new_size < 0 || new_size > 1000000LL * 4096) {
             return absl::InternalError("Invalid size in MetadataBlock during recovery");
           }
-          logical_size_ = new_size;
-          int64_t ceil_blocks = (new_size + 4095) / 4096;
-          logical_to_physical_.resize(ceil_blocks, -1);
         }
       }
     }
+
+    recovered_records.push_back({offset, block_index, is_good, new_size});
     offset += 4105;
+  }
+
+  // Determine which records are applied (backward pass)
+  std::vector<bool> applied(recovered_records.size(), false);
+  bool applied_next = false;
+  for (int64_t i = static_cast<int64_t>(recovered_records.size()) - 1; i >= 0; --i) {
+    if (recovered_records[i].is_good == 1) {
+      applied_next = true;
+    } else if (recovered_records[i].is_good == 0) {
+      applied_next = false;
+    } else if (recovered_records[i].is_good == 2) {
+      // remains applied_next
+    } else {
+      applied_next = false; // treat unknown states as abort
+    }
+    applied[i] = applied_next;
+  }
+
+  // Apply the records forward to reconstruct logical state and mappings
+  for (size_t i = 0; i < recovered_records.size(); ++i) {
+    if (!applied[i]) {
+      continue;
+    }
+    const auto& rec = recovered_records[i];
+    if (rec.block_index >= 0) {
+      if (rec.block_index >= static_cast<int64_t>(logical_to_physical_.size())) {
+        logical_to_physical_.resize(rec.block_index + 1, -1);
+      }
+      logical_to_physical_[rec.block_index] = rec.offset + 8;
+      logical_size_ = std::max(logical_size_, (rec.block_index + 1) * 4096);
+    } else if (rec.block_index == -1) {
+      if (rec.new_size != -1) {
+        logical_size_ = rec.new_size;
+        int64_t ceil_blocks = (rec.new_size + 4095) / 4096;
+        logical_to_physical_.resize(ceil_blocks, -1);
+      }
+    }
   }
 
   initialized_ = true;
@@ -133,27 +174,42 @@ absl::Status BlockMapper::ReadLocked(uint8_t* buf, size_t size,
         std::min(static_cast<int64_t>(4096 - block_offset), remaining_size);
 
     bool mapped = false;
-    int64_t physical_base = -1;
-    if (block_index >= 0 &&
-        block_index < static_cast<int64_t>(logical_to_physical_.size())) {
-      physical_base = logical_to_physical_[block_index];
-      if (physical_base != -1) {
-        mapped = true;
+    bool found_in_pending = false;
+    const uint8_t* pending_payload = nullptr;
+
+    for (auto it = pending_records_.rbegin(); it != pending_records_.rend(); ++it) {
+      if (it->block_index == block_index) {
+        found_in_pending = true;
+        pending_payload = it->payload;
+        break;
       }
     }
 
-    if (mapped) {
-      int64_t physical_offset = physical_base + block_offset;
-      auto read_or =
-          storage_->PRead(buf + buf_offset, block_len, physical_offset);
-      if (!read_or.ok()) {
-        return read_or.status();
-      }
-      if (read_or.value() < static_cast<size_t>(block_len)) {
-        return absl::InternalError("Short read from physical storage");
-      }
+    if (found_in_pending) {
+      std::memcpy(buf + buf_offset, pending_payload + block_offset, block_len);
     } else {
-      std::memset(buf + buf_offset, 0, block_len);
+      int64_t physical_base = -1;
+      if (block_index >= 0 &&
+          block_index < static_cast<int64_t>(logical_to_physical_.size())) {
+        physical_base = logical_to_physical_[block_index];
+        if (physical_base != -1) {
+          mapped = true;
+        }
+      }
+
+      if (mapped) {
+        int64_t physical_offset = physical_base + block_offset;
+        auto read_or =
+            storage_->PRead(buf + buf_offset, block_len, physical_offset);
+        if (!read_or.ok()) {
+          return read_or.status();
+        }
+        if (read_or.value() < static_cast<size_t>(block_len)) {
+          return absl::InternalError("Short read from physical storage");
+        }
+      } else {
+        std::memset(buf + buf_offset, 0, block_len);
+      }
     }
 
     remaining_size -= block_len;
@@ -206,25 +262,11 @@ absl::Status BlockMapper::Write(const uint8_t* buf, size_t size,
                   4096);
     }
 
-    // Construct 4105-byte record
-    uint8_t record_buf[4105];
-    int64_t block_index = b;
-    std::memcpy(record_buf, &block_index, sizeof(int64_t));
-    std::memcpy(record_buf + 8, block_data, 4096);
-    record_buf[4104] = 1;  // is_good = 1
-
-    // Append to storage
-    auto append_res = storage_->Append(record_buf, 4105);
-    if (!append_res.ok()) {
-      return append_res.status();
-    }
-    int64_t physical_offset = append_res.value();
-
-    // Map block
-    if (b >= static_cast<int64_t>(logical_to_physical_.size())) {
-      logical_to_physical_.resize(b + 1, -1);
-    }
-    logical_to_physical_[b] = physical_offset + 8;
+    // Add to pending records
+    PendingRecord pr;
+    pr.block_index = b;
+    std::memcpy(pr.payload, block_data, 4096);
+    pending_records_.push_back(pr);
   }
 
   logical_size_ =
@@ -252,35 +294,69 @@ absl::Status BlockMapper::Truncate(int64_t new_size) {
     return absl::InternalError("Serialized MetadataBlock exceeds maximum metadata payload size");
   }
 
-  // Construct a truncate record
-  uint8_t record_buf[4105];
-  int64_t block_index = -1;
-  std::memcpy(record_buf, &block_index, sizeof(int64_t));
+  // Construct a pending truncate record
+  PendingRecord pr;
+  pr.block_index = -1;
   
   int64_t proto_size = serialized.size();
-  std::memcpy(record_buf + 8, &proto_size, sizeof(proto_size));
-  std::memcpy(record_buf + 16, serialized.data(), proto_size);
-  std::memset(record_buf + 16 + proto_size, 0, 4088 - proto_size);
-  record_buf[4104] = 1;  // is_good = 1
+  std::memcpy(pr.payload, &proto_size, sizeof(proto_size));
+  std::memcpy(pr.payload + 8, serialized.data(), proto_size);
+  std::memset(pr.payload + 8 + proto_size, 0, 4088 - proto_size);
 
-  auto append_res = storage_->Append(record_buf, 4105);
-  if (!append_res.ok()) {
-    return append_res.status();
-  }
+  pending_records_.push_back(pr);
 
   // Update mappings and logical_size_
   logical_size_ = new_size;
   int64_t ceil_blocks = (new_size + 4095) / 4096;
+
+  // Prune any pending records for blocks that are now out of bounds
+  pending_records_.erase(
+      std::remove_if(pending_records_.begin(), pending_records_.end(),
+                     [ceil_blocks](const PendingRecord& r) {
+                       return r.block_index >= ceil_blocks;
+                     }),
+      pending_records_.end());
+
   logical_to_physical_.resize(ceil_blocks, -1);
 
   return absl::OkStatus();
 }
 
 absl::Status BlockMapper::Sync() {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   if (!initialized_) {
     return absl::FailedPreconditionError("BlockMapper not initialized");
   }
+
+  if (pending_records_.empty()) {
+    return storage_->Sync();
+  }
+
+  // Write all pending records sequentially
+  for (size_t i = 0; i < pending_records_.size(); ++i) {
+    const auto& pr = pending_records_[i];
+
+    uint8_t record_buf[4105];
+    std::memcpy(record_buf, &pr.block_index, sizeof(int64_t));
+    std::memcpy(record_buf + 8, pr.payload, 4096);
+    // Write state 2 for non-last blocks, and state 1 for the last block
+    record_buf[4104] = (i == pending_records_.size() - 1) ? 1 : 2;
+
+    auto append_res = storage_->Append(record_buf, 4105);
+    if (!append_res.ok()) {
+      return append_res.status();
+    }
+    int64_t physical_offset = append_res.value();
+
+    if (pr.block_index >= 0) {
+      if (pr.block_index >= static_cast<int64_t>(logical_to_physical_.size())) {
+        logical_to_physical_.resize(pr.block_index + 1, -1);
+      }
+      logical_to_physical_[pr.block_index] = physical_offset + 8;
+    }
+  }
+
+  pending_records_.clear();
   return storage_->Sync();
 }
 

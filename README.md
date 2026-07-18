@@ -11,7 +11,10 @@ Because files are append-only, the backend translates random-access logical page
 The database file is represented as a sequence of **4105-byte records**:
 *   **Block Index** (`int64_t`, 8 bytes): The logical 4k block index (or `-1` to represent a metadata event).
 *   **Data** (`uint8_t[4096]`, 4096 bytes): The 4k database page payload (or a protocol buffer structure for metadata events).
-*   **Validity Flag** (`uint8_t`, 1 byte): `1` if the block is good/complete, or `0` if it is garbage/padding written to repair a partial block after a crash.
+*   **Validity Flag** (`uint8_t`, 1 byte):
+    *   `0`: The block is aborted/ignored (or is garbage/padding written to repair a partial block after a crash).
+    *   `1`: The block is committed/applied.
+    *   `2`: The block is chained. It is applied only if the physically next block in storage is also applied. This allows a batch of blocks to be committed atomically by writing the initial blocks with flag `2` and the final block with flag `1`.
 
 ### Metadata Block (`block_index == -1`)
 For metadata events (`block_index == -1`), the 4096-byte payload contains a protocol buffer payload with the following layout:
@@ -25,9 +28,13 @@ The `sqlite.MetadataBlock` protocol buffer contains the following fields:
 ### Crash Recovery Scan
 Upon opening a database:
 1.  The physical file size is verified. If the size is not a multiple of 4105 bytes, the trailing incomplete write is padded with garbage bytes (`is_good = 0`) to align subsequent appends.
-2.  The file is scanned sequentially from offset 0.
-3.  Each valid record (where `is_good == 1`) reconstructs the block mapping in an in-memory `std::vector<int64_t>`. Later records automatically overwrite previous mappings for the same block index.
-4.  Metadata blocks (`block_index == -1`) parse the `sqlite.MetadataBlock` protocol buffer from the payload. If the `new_size` field is set, it prunes out-of-bounds mappings and updates the logical file size (truncation).
+2.  The file is scanned sequentially to extract record headers.
+3.  Each record's application status is determined in a backward pass:
+    *   `is_good == 1` is applied.
+    *   `is_good == 0` is ignored.
+    *   `is_good == 2` is applied only if the physically next record is applied.
+4.  Applied records are processed in a forward pass to reconstruct the block mapping in an in-memory `std::vector<int64_t>`. Later records automatically overwrite previous mappings for the same block index.
+5.  Metadata blocks (`block_index == -1`) parse the `sqlite.MetadataBlock` protocol buffer from the payload. If the `new_size` field is set, it prunes out-of-bounds mappings and updates the logical file size (truncation).
 
 ### Forward & Backwards Compatibility
 To ensure that all prior revisions of the file format remain readable with new versions of the code:

@@ -94,7 +94,10 @@ cc_library(
 cc_test(
     name = "block_mapper_test",
     srcs = ["block_mapper_test.cc"],
-    data = ["testdata/format_v1.db"],
+    data = [
+        "testdata/format_v1.db",
+        "testdata/format_v2.db",
+    ],
     deps = [
         ":block_mapper",
         ":local_storage",

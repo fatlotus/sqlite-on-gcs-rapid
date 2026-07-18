@@ -178,6 +178,7 @@ TEST_F(BlockMapperTest, CrashRecovery) {
     std::vector<uint8_t> b1(4096, 8);
     ASSERT_TRUE(mapper->Write(b0.data(), b0.size(), 0).ok());
     ASSERT_TRUE(mapper->Write(b1.data(), b1.size(), 4096).ok());
+    ASSERT_TRUE(mapper->Sync().ok());
   }
 
   // 2. Simulate crash by appending a partial record (e.g. write 100 bytes of
@@ -285,6 +286,178 @@ TEST_F(BlockMapperTest, BackwardsCompatibleV1) {
     ASSERT_TRUE(mapper->Read(r1.data(), r1.size(), 4096).ok());
     for (uint8_t v : r1) {
       EXPECT_EQ(v, 'B');
+    }
+  }
+
+  unlink(dst_path.c_str());
+}
+
+TEST_F(BlockMapperTest, TransactionBatchWriting) {
+  auto storage_or = LocalStorage::Open(test_path_);
+  ASSERT_TRUE(storage_or.ok());
+  auto mapper = std::make_unique<BlockMapper>(std::move(storage_or.value()));
+  ASSERT_TRUE(mapper->Init().ok());
+
+  std::vector<uint8_t> data0(4096, 11);
+  std::vector<uint8_t> data1(4096, 22);
+  std::vector<uint8_t> data2(4096, 33);
+
+  // Write block 0, 1, 2
+  ASSERT_TRUE(mapper->Write(data0.data(), data0.size(), 0).ok());
+  ASSERT_TRUE(mapper->Write(data1.data(), data1.size(), 4096).ok());
+  ASSERT_TRUE(mapper->Write(data2.data(), data2.size(), 8192).ok());
+
+  // Verify that before Sync, ReadLocked can still read the buffered data
+  std::vector<uint8_t> read0(4096, 0);
+  ASSERT_TRUE(mapper->Read(read0.data(), read0.size(), 0).ok());
+  EXPECT_EQ(read0, data0);
+
+  // Sync the batch
+  ASSERT_TRUE(mapper->Sync().ok());
+
+  // Check physical file size: should be 3 * 4105 = 12315
+  {
+    auto check_storage_or = LocalStorage::Open(test_path_);
+    ASSERT_TRUE(check_storage_or.ok());
+    auto size_or = check_storage_or.value()->GetSize();
+    ASSERT_TRUE(size_or.ok());
+    EXPECT_EQ(size_or.value(), 12315);
+
+    // Read the records directly from storage and verify the validity flags:
+    // record 0 should be 2, record 1 should be 2, record 2 should be 1
+    uint8_t record0[4105], record1[4105], record2[4105];
+    ASSERT_TRUE(check_storage_or.value()->PRead(record0, 4105, 0).ok());
+    ASSERT_TRUE(check_storage_or.value()->PRead(record1, 4105, 4105).ok());
+    ASSERT_TRUE(check_storage_or.value()->PRead(record2, 4105, 8210).ok());
+
+    EXPECT_EQ(record0[4104], 2);
+    EXPECT_EQ(record1[4104], 2);
+    EXPECT_EQ(record2[4104], 1);
+  }
+}
+
+TEST_F(BlockMapperTest, TransactionCrashedNoCommit) {
+  // Construct a crashed log by appending two blocks with is_good = 2,
+  // but no terminating is_good = 1 record.
+  {
+    auto storage_or = LocalStorage::Open(test_path_);
+    ASSERT_TRUE(storage_or.ok());
+    auto storage = std::move(storage_or.value());
+
+    uint8_t record_buf[4105] = {0};
+    int64_t block_index = 0;
+    std::memcpy(record_buf, &block_index, sizeof(int64_t));
+    std::memset(record_buf + 8, 'A', 4096);
+    record_buf[4104] = 2; // is_good = 2 (chained, but no next block)
+
+    ASSERT_TRUE(storage->Append(record_buf, 4105).ok());
+
+    block_index = 1;
+    std::memcpy(record_buf, &block_index, sizeof(int64_t));
+    std::memset(record_buf + 8, 'B', 4096);
+    record_buf[4104] = 2; // is_good = 2 (chained, but no next block)
+
+    ASSERT_TRUE(storage->Append(record_buf, 4105).ok());
+  }
+
+  // Open BlockMapper on the file and run Init()
+  {
+    auto storage_or = LocalStorage::Open(test_path_);
+    ASSERT_TRUE(storage_or.ok());
+    auto mapper = std::make_unique<BlockMapper>(std::move(storage_or.value()));
+    ASSERT_TRUE(mapper->Init().ok());
+
+    // Logical size should still be 0, and no blocks should be mapped
+    EXPECT_EQ(mapper->logical_size(), 0);
+    EXPECT_FALSE(mapper->IsBlockMapped(0));
+    EXPECT_FALSE(mapper->IsBlockMapped(1));
+  }
+
+  // Now commit the transaction by appending a record with is_good = 1
+  {
+    auto storage_or = LocalStorage::Open(test_path_);
+    ASSERT_TRUE(storage_or.ok());
+    auto storage = std::move(storage_or.value());
+
+    uint8_t record_buf[4105] = {0};
+    int64_t block_index = 2;
+    std::memcpy(record_buf, &block_index, sizeof(int64_t));
+    std::memset(record_buf + 8, 'C', 4096);
+    record_buf[4104] = 1; // is_good = 1 (commits the chain!)
+
+    ASSERT_TRUE(storage->Append(record_buf, 4105).ok());
+  }
+
+  // Open BlockMapper again and check recovery
+  {
+    auto storage_or = LocalStorage::Open(test_path_);
+    ASSERT_TRUE(storage_or.ok());
+    auto mapper = std::make_unique<BlockMapper>(std::move(storage_or.value()));
+    ASSERT_TRUE(mapper->Init().ok());
+
+    // Now all blocks should be recovered!
+    EXPECT_EQ(mapper->logical_size(), 12288); // 3 blocks * 4096
+    EXPECT_TRUE(mapper->IsBlockMapped(0));
+    EXPECT_TRUE(mapper->IsBlockMapped(1));
+    EXPECT_TRUE(mapper->IsBlockMapped(2));
+
+    std::vector<uint8_t> r0(4096, 0), r1(4096, 0), r2(4096, 0);
+    ASSERT_TRUE(mapper->Read(r0.data(), r0.size(), 0).ok());
+    ASSERT_TRUE(mapper->Read(r1.data(), r1.size(), 4096).ok());
+    ASSERT_TRUE(mapper->Read(r2.data(), r2.size(), 8192).ok());
+
+    for (uint8_t v : r0) EXPECT_EQ(v, 'A');
+    for (uint8_t v : r1) EXPECT_EQ(v, 'B');
+    for (uint8_t v : r2) EXPECT_EQ(v, 'C');
+  }
+}
+
+TEST_F(BlockMapperTest, BackwardsCompatibleV2) {
+  std::string src_path = "testdata/format_v2.db";
+  std::string dst_path = GetTestFilePath() + "_v2_test.db";
+  unlink(dst_path.c_str());
+
+  {
+    std::ifstream src(src_path, std::ios::binary);
+    ASSERT_TRUE(src.is_open()) << "Failed to open source compatibility file: " << src_path;
+    std::ofstream dst(dst_path, std::ios::binary);
+    ASSERT_TRUE(dst.is_open()) << "Failed to open temporary destination file: " << dst_path;
+    dst << src.rdbuf();
+  }
+
+  {
+    auto storage_or = LocalStorage::Open(dst_path);
+    ASSERT_TRUE(storage_or.ok());
+    auto mapper = std::make_unique<BlockMapper>(std::move(storage_or.value()));
+    ASSERT_TRUE(mapper->Init().ok());
+
+    // Verify logical size recovered is 12288 (3 blocks).
+    EXPECT_EQ(mapper->logical_size(), 12288);
+
+    // Verify block mappings.
+    EXPECT_TRUE(mapper->IsBlockMapped(0));
+    EXPECT_TRUE(mapper->IsBlockMapped(1));
+    EXPECT_TRUE(mapper->IsBlockMapped(2));
+
+    // Verify read data for block 0.
+    std::vector<uint8_t> r0(4096, 0);
+    ASSERT_TRUE(mapper->Read(r0.data(), r0.size(), 0).ok());
+    for (uint8_t v : r0) {
+      EXPECT_EQ(v, 'X');
+    }
+
+    // Verify read data for block 1.
+    std::vector<uint8_t> r1(4096, 0);
+    ASSERT_TRUE(mapper->Read(r1.data(), r1.size(), 4096).ok());
+    for (uint8_t v : r1) {
+      EXPECT_EQ(v, 'Y');
+    }
+
+    // Verify read data for block 2.
+    std::vector<uint8_t> r2(4096, 0);
+    ASSERT_TRUE(mapper->Read(r2.data(), r2.size(), 8192).ok());
+    for (uint8_t v : r2) {
+      EXPECT_EQ(v, 'Z');
     }
   }
 

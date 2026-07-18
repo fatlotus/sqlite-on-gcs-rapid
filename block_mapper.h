@@ -44,6 +44,11 @@ class BlockMapper {
   // Helper to check if a block is mapped.
   bool IsBlockMapped(int64_t block_index) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
+    for (auto it = pending_records_.rbegin(); it != pending_records_.rend(); ++it) {
+      if (it->block_index == block_index) {
+        return true;
+      }
+    }
     if (block_index >= 0 &&
         block_index < static_cast<int64_t>(logical_to_physical_.size())) {
       return logical_to_physical_[block_index] != -1;
@@ -52,6 +57,11 @@ class BlockMapper {
   }
 
  private:
+  struct PendingRecord {
+    int64_t block_index;
+    uint8_t payload[4096];
+  };
+
   absl::Status ReadLocked(uint8_t* buf, size_t size,
                           int64_t logical_offset) const;
 
@@ -60,6 +70,8 @@ class BlockMapper {
 
   // Maps logical block index to its physical offset in storage (offset + 8).
   std::vector<int64_t> logical_to_physical_;
+
+  std::vector<PendingRecord> pending_records_;
 
   int64_t logical_size_ = 0;
   bool initialized_ = false;

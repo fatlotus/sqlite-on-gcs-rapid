@@ -48,6 +48,7 @@ TEST(CompactorTest, WriteCompactedRecordsSuccess) {
     // Overwrite block 0 with 'C'
     std::vector<uint8_t> block_data_c(4096, 'C');
     ASSERT_TRUE(mapper.Write(block_data_c.data(), block_data_c.size(), 0).ok());
+    ASSERT_TRUE(mapper.Sync().ok());
   }
 
   // 2. Open via BlockMapper and write to stream
