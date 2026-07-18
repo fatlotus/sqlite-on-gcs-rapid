@@ -58,33 +58,67 @@ TEST(GcsIntegrationTest, LoadExtensionAndQueryGcs) {
   // Close the in-memory database
   sqlite3_close(db);
 
-  // Open the GCS database using the "appendonly" VFS
+  // Open the GCS database using the "appendonly" VFS in read-write mode
   db = nullptr;
-  rc =
-      sqlite3_open_v2(gcs_url.c_str(), &db, SQLITE_OPEN_READONLY, "appendonly");
-  ASSERT_EQ(rc, SQLITE_OK) << "Failed to open GCS database: "
+  rc = sqlite3_open_v2(gcs_url.c_str(), &db,
+                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                       "appendonly");
+  ASSERT_EQ(rc, SQLITE_OK) << "Failed to open GCS database for write: "
                            << (db ? sqlite3_errmsg(db) : "unknown error");
 
-  // Query the database
+  // Create table and insert rows
+  char* sql_err = nullptr;
+  rc = sqlite3_exec(db, "CREATE TABLE test_table(id INTEGER PRIMARY KEY, val TEXT);", nullptr, nullptr, &sql_err);
+  std::string sql_err_str = sql_err ? sql_err : "";
+  if (sql_err) sqlite3_free(sql_err);
+  ASSERT_EQ(rc, SQLITE_OK) << "Failed to create table: " << sql_err_str;
+
+  rc = sqlite3_exec(db, "INSERT INTO test_table (val) VALUES ('hello');", nullptr, nullptr, &sql_err);
+  sql_err_str = sql_err ? sql_err : "";
+  if (sql_err) sqlite3_free(sql_err);
+  ASSERT_EQ(rc, SQLITE_OK) << "Failed to insert hello: " << sql_err_str;
+
+  rc = sqlite3_exec(db, "INSERT INTO test_table (val) VALUES ('world');", nullptr, nullptr, &sql_err);
+  sql_err_str = sql_err ? sql_err : "";
+  if (sql_err) sqlite3_free(sql_err);
+  ASSERT_EQ(rc, SQLITE_OK) << "Failed to insert world: " << sql_err_str;
+
+  // Read back data before closing
   sqlite3_stmt* stmt = nullptr;
-  rc = sqlite3_prepare_v2(db,
-                          "SELECT name FROM sqlite_master WHERE type='table';",
-                          -1, &stmt, nullptr);
+  rc = sqlite3_prepare_v2(db, "SELECT val FROM test_table ORDER BY id;", -1, &stmt, nullptr);
   ASSERT_EQ(rc, SQLITE_OK) << "Failed to prepare query: " << sqlite3_errmsg(db);
 
-  std::cout << "Tables in production GCS database:" << std::endl;
-  int row_count = 0;
-  while (sqlite3_step(stmt) == SQLITE_ROW) {
-    row_count++;
-    const unsigned char* name = sqlite3_column_text(stmt, 0);
-    std::cout << " - " << (name ? reinterpret_cast<const char*>(name) : "")
-              << std::endl;
-  }
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))), "hello");
+
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))), "world");
+
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_DONE);
   sqlite3_finalize(stmt);
   sqlite3_close(db);
 
-  std::cout << "Query completed successfully. Found " << row_count << " tables."
-            << std::endl;
+  // Reopen the GCS database in read-only mode to verify persistence
+  db = nullptr;
+  rc = sqlite3_open_v2(gcs_url.c_str(), &db, SQLITE_OPEN_READONLY, "appendonly");
+  ASSERT_EQ(rc, SQLITE_OK) << "Failed to reopen GCS database: "
+                           << (db ? sqlite3_errmsg(db) : "unknown error");
+
+  stmt = nullptr;
+  rc = sqlite3_prepare_v2(db, "SELECT val FROM test_table ORDER BY id;", -1, &stmt, nullptr);
+  ASSERT_EQ(rc, SQLITE_OK) << "Failed to prepare query after reopen: " << sqlite3_errmsg(db);
+
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))), "hello");
+
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))), "world");
+
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_DONE);
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+
+  std::cout << "GCS read/write integration test completed successfully." << std::endl;
 }
 
 }  // namespace
