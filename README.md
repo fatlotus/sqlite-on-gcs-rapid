@@ -1,47 +1,20 @@
-# SQLite3 Append-Only VFS on Google Cloud Storage (GCS)
+# SQLite3-on-Object Storage w/speed and durability
 
-This project implements a custom SQLite3 Virtual File System (VFS) C++ backend designed for append-only storage engines, with specific support for high-performance Google Cloud Storage (GCS) Rapid (zonal) buckets. 
+**Disclaimer**: This repository is not an official Google product. Do not use it in production. It is >97% slop (probably).
 
-Because files are append-only, the backend translates random-access logical page reads and writes into sequential appends on physical storage using an in-memory block translation layer and crash recovery scanner.
+**Background**: sqlite has long been a useful primitive for adding schemas on top of lower level storage. Typically people go one of two ways with it:
 
----
+1. You can use a bespoke Raft log for commits, and use a custom backend for the sqlite database. I believe this approach was first pioneered by rqlite (https://philipotoole.com/twelve-years-of-distributed-sqlite/), but has been used by many projects over the years.
 
-## Architecture & File Format
+    **Downsides**: You gotta run a server; the server needs to speak a bespoke protocol.
 
-The database file is represented as a sequence of **4105-byte records**:
-*   **Block Index** (`int64_t`, 8 bytes): The logical 4k block index (or `-1` to represent a metadata event).
-*   **Data** (`uint8_t[4096]`, 4096 bytes): The 4k database page payload (or a protocol buffer structure for metadata events).
-*   **Validity Flag** (`uint8_t`, 1 byte):
-    *   `0`: The block is aborted/ignored (or is garbage/padding written to repair a partial block after a crash).
-    *   `1`: The block is committed/applied.
-    *   `2`: The block is chained. It is applied only if the physically next block in storage is also applied. This allows a batch of blocks to be committed atomically by writing the initial blocks with flag `2` and the final block with flag `1`.
+2. Alternatively, you can use object storage. Each write then uploads either the entire database, or writes a bunch of tiny objects to S3. This second approach is probably best exemplified by Litestream (https://litestream.io/), which streams out commits to the WAL as writes to object storage.
 
-### Metadata Block (`block_index == -1`)
-For metadata events (`block_index == -1`), the 4096-byte payload contains a protocol buffer payload with the following layout:
-*   **Proto Size** (`int64_t`, 8 bytes): The size of the serialized protocol buffer (stored at payload offset 0).
-*   **Proto Bytes** (`uint8_t[proto_size]`, `proto_size` bytes): The serialized `sqlite.MetadataBlock` protocol buffer bytes.
-*   **Padding** (`uint8_t[4088 - proto_size]`, zero-padded to fill out the remaining 4096-byte block payload).
+    **Downsides**: Uploading an object to typical object storage is pretty slow.
 
-The `sqlite.MetadataBlock` protocol buffer contains the following fields:
-*   `new_size` (`int64`): If present, indicates a truncation of the logical database to the specified size.
+But- there's another way! Google Cloud Storage recently added support for appendable objects (https://docs.cloud.google.com/storage/docs/rapid/use-objects-in-zonal-buckets) — notably, it's faster to append to an object (~1ms) than it is to upload a new object (~10ms).
 
-### Crash Recovery Scan
-Upon opening a database:
-1.  The physical file size is verified. If the size is not a multiple of 4105 bytes, the trailing incomplete write is padded with garbage bytes (`is_good = 0`) to align subsequent appends.
-2.  The file is scanned sequentially to extract record headers.
-3.  Each record's application status is determined in a backward pass:
-    *   `is_good == 1` is applied.
-    *   `is_good == 0` is ignored.
-    *   `is_good == 2` is applied only if the physically next record is applied.
-4.  Applied records are processed in a forward pass to reconstruct the block mapping in an in-memory `std::vector<int64_t>`. Later records automatically overwrite previous mappings for the same block index.
-5.  Metadata blocks (`block_index == -1`) parse the `sqlite.MetadataBlock` protocol buffer from the payload. If the `new_size` field is set, it prunes out-of-bounds mappings and updates the logical file size (truncation).
-
-### Forward & Backwards Compatibility
-To ensure that all prior revisions of the file format remain readable with new versions of the code:
-- Any future metadata or formatting change should check in a test database file demonstrating the changes.
-- Future changes to the file format should duplicate the corresponding backwards compatibility test (like `BackwardsCompatibleV1` in [block_mapper_test.cc](file:///Users/jeremyarcher/2026/05-May/sqlite/block_mapper_test.cc)) to ensure older formats remain readable by newer versions.
-
----
+In that sense, you get the best of both worlds: no server is required, but you still get the durability of a Raft-level solution, and commit latency is much faster than Litestream.
 
 ## Build Instructions
 
@@ -58,8 +31,6 @@ bazel test //...
 ```
 
 The compiled shared library will be located at `bazel-bin/libsqlite3_gcsvfs.so`.
-
----
 
 ## Quick Start / Demo with Prebuilt Extension
 
@@ -208,5 +179,4 @@ gcloud storage buckets create gs://my-sqlite-rapid-bucket \
     --uniform-bucket-level-access \
     --enable-hierarchical-namespace
 ```
-*(Note: Zonal / Rapid buckets are currently in preview and require whitelisting on your GCP project. If your project is not whitelisted, the command will return a 400 Location Constraint error. Only GCS Rapid zonal buckets support the **Appendable Object** feature; standard regional or multi-regional buckets do not support appends and cannot be used as a fallback for this VFS.)*
-
+*(Note: Only GCS Rapid zonal buckets support the **Appendable Object** feature; standard regional or multi-regional buckets do not support appends and cannot be used as a fallback for this VFS.)*
