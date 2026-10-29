@@ -8,10 +8,22 @@ use crate::gcs::db_file::GcsDbFile;
 use crate::gcs::wal_file::GcsWalFile;
 use crate::vfs::*;
 
+/// In-memory file representation for transient files and rollback journals.
+pub struct MemFile {
+    pub data: Vec<u8>,
+}
+
+impl MemFile {
+    pub fn new() -> Self {
+        Self { data: Vec::new() }
+    }
+}
+
 /// Representation of an open SQLite file handle in the GCS VFS.
 pub enum GcsFileHandle {
     Db(Box<GcsDbFile>),
     Wal(Box<GcsWalFile>),
+    Mem(Box<MemFile>),
 }
 
 /// Layout of `sqlite3_file` allocated by SQLite using `vfs.szOsFile`.
@@ -63,6 +75,26 @@ pub static GCS_WAL_IO_METHODS: sqlite3_io_methods = sqlite3_io_methods {
     xFileControl: wal_xFileControl,
     xSectorSize: file_xSectorSize,
     xDeviceCharacteristics: wal_xDeviceCharacteristics,
+    xShmMap: prohibited_xShmMap,
+    xShmLock: prohibited_xShmLock,
+    xShmBarrier: prohibited_xShmBarrier,
+    xShmUnmap: prohibited_xShmUnmap,
+};
+
+pub static GCS_MEM_IO_METHODS: sqlite3_io_methods = sqlite3_io_methods {
+    iVersion: 2,
+    xClose: mem_xClose,
+    xRead: mem_xRead,
+    xWrite: mem_xWrite,
+    xTruncate: mem_xTruncate,
+    xSync: mem_xSync,
+    xFileSize: mem_xFileSize,
+    xLock: file_xLock,
+    xUnlock: file_xUnlock,
+    xCheckReservedLock: file_xCheckReservedLock,
+    xFileControl: mem_xFileControl,
+    xSectorSize: file_xSectorSize,
+    xDeviceCharacteristics: mem_xDeviceCharacteristics,
     xShmMap: prohibited_xShmMap,
     xShmLock: prohibited_xShmLock,
     xShmBarrier: prohibited_xShmBarrier,
@@ -349,6 +381,126 @@ unsafe extern "C" fn wal_xFileControl(
 unsafe extern "C" fn wal_xDeviceCharacteristics(_p_file: *mut sqlite3_file) -> libc::c_int {
     // WAL file uses GCS Rapid atomic appendability
     SQLITE_IOCAP_SAFE_APPEND | SQLITE_IOCAP_SEQUENTIAL
+}
+
+// ----------------------------------------------------------------------------
+// In-Memory Temporary File & Rollback Journal Implementations
+// ----------------------------------------------------------------------------
+
+unsafe extern "C" fn mem_xClose(p_file: *mut sqlite3_file) -> libc::c_int {
+    let f = &mut *(p_file as *mut GcsSqliteFile);
+    if !f.handle.is_null() {
+        let _ = Box::from_raw(f.handle);
+        f.handle = std::ptr::null_mut();
+    }
+    SQLITE_OK
+}
+
+unsafe extern "C" fn mem_xRead(
+    p_file: *mut sqlite3_file,
+    z_buf: *mut libc::c_void,
+    i_amt: libc::c_int,
+    i_ofst: i64,
+) -> libc::c_int {
+    let f = &mut *(p_file as *mut GcsSqliteFile);
+    if f.handle.is_null() || i_amt <= 0 || i_ofst < 0 {
+        return SQLITE_IOERR_READ;
+    }
+    let handle = &mut *f.handle;
+    let mem = match handle {
+        GcsFileHandle::Mem(ref mut m) => m,
+        _ => return SQLITE_IOERR_READ,
+    };
+
+    let dest = std::slice::from_raw_parts_mut(z_buf as *mut u8, i_amt as usize);
+    let offset = i_ofst as usize;
+
+    if offset >= mem.data.len() {
+        dest.fill(0);
+        return SQLITE_IOERR_SHORT_READ;
+    }
+
+    let available = mem.data.len() - offset;
+    let copy_len = available.min(dest.len());
+    dest[..copy_len].copy_from_slice(&mem.data[offset..offset + copy_len]);
+
+    if copy_len < dest.len() {
+        dest[copy_len..].fill(0);
+        return SQLITE_IOERR_SHORT_READ;
+    }
+
+    SQLITE_OK
+}
+
+unsafe extern "C" fn mem_xWrite(
+    p_file: *mut sqlite3_file,
+    z_buf: *const libc::c_void,
+    i_amt: libc::c_int,
+    i_ofst: i64,
+) -> libc::c_int {
+    let f = &mut *(p_file as *mut GcsSqliteFile);
+    if f.handle.is_null() || i_amt < 0 || i_ofst < 0 {
+        return SQLITE_IOERR_WRITE;
+    }
+    let handle = &mut *f.handle;
+    let mem = match handle {
+        GcsFileHandle::Mem(ref mut m) => m,
+        _ => return SQLITE_IOERR_WRITE,
+    };
+
+    let src = std::slice::from_raw_parts(z_buf as *const u8, i_amt as usize);
+    let offset = i_ofst as usize;
+    let end = offset + src.len();
+
+    if end > mem.data.len() {
+        mem.data.resize(end, 0);
+    }
+    mem.data[offset..end].copy_from_slice(src);
+    SQLITE_OK
+}
+
+unsafe extern "C" fn mem_xTruncate(p_file: *mut sqlite3_file, size: i64) -> libc::c_int {
+    let f = &mut *(p_file as *mut GcsSqliteFile);
+    if f.handle.is_null() || size < 0 {
+        return SQLITE_IOERR_TRUNCATE;
+    }
+    let handle = &mut *f.handle;
+    let mem = match handle {
+        GcsFileHandle::Mem(ref mut m) => m,
+        _ => return SQLITE_IOERR_TRUNCATE,
+    };
+    mem.data.truncate(size as usize);
+    SQLITE_OK
+}
+
+unsafe extern "C" fn mem_xSync(_p_file: *mut sqlite3_file, _flags: libc::c_int) -> libc::c_int {
+    SQLITE_OK
+}
+
+unsafe extern "C" fn mem_xFileSize(p_file: *mut sqlite3_file, p_size: *mut i64) -> libc::c_int {
+    let f = &mut *(p_file as *mut GcsSqliteFile);
+    if f.handle.is_null() || p_size.is_null() {
+        return SQLITE_IOERR;
+    }
+    let handle = &*f.handle;
+    let mem = match handle {
+        GcsFileHandle::Mem(ref m) => m,
+        _ => return SQLITE_IOERR,
+    };
+    *p_size = mem.data.len() as i64;
+    SQLITE_OK
+}
+
+unsafe extern "C" fn mem_xFileControl(
+    _p_file: *mut sqlite3_file,
+    _op: libc::c_int,
+    _p_arg: *mut libc::c_void,
+) -> libc::c_int {
+    SQLITE_NOTFOUND
+}
+
+unsafe extern "C" fn mem_xDeviceCharacteristics(_p_file: *mut sqlite3_file) -> libc::c_int {
+    SQLITE_IOCAP_ATOMIC | SQLITE_IOCAP_POWERSAFE_OVERWRITE
 }
 
 // ----------------------------------------------------------------------------

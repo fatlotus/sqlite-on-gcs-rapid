@@ -17,12 +17,22 @@ impl GcsUri {
 
     /// Returns the corresponding WAL object name for this database object.
     pub fn wal_object(&self) -> String {
-        format!("{}-wal", self.object)
+        if self.object.ends_with("-wal") {
+            self.object.clone()
+        } else {
+            format!("{}-wal", self.object)
+        }
     }
 
     /// Returns the corresponding SHM object name (which is prohibited).
     pub fn shm_object(&self) -> String {
-        format!("{}-shm", self.object)
+        if self.object.ends_with("-shm") {
+            self.object.clone()
+        } else if self.object.ends_with("-wal") {
+            format!("{}-shm", &self.object[..self.object.len() - 4])
+        } else {
+            format!("{}-shm", self.object)
+        }
     }
 
     /// Constructs a full `gs://` URI.

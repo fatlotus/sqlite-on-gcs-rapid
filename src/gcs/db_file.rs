@@ -94,37 +94,37 @@ impl GcsDbFile {
 
         let readable_bytes = ((logical_end - offset) as usize).min(amt);
 
-        // Fetch data into the readable portion of buf
-        for pos in 0..readable_bytes {
-            let byte_offset = offset + pos as u64;
-            let page_idx = byte_offset / PAGE_SIZE as u64;
-            let page_offset = (byte_offset % PAGE_SIZE as u64) as usize;
+        let start_page = offset / PAGE_SIZE as u64;
+        let end_page = (offset + readable_bytes as u64 - 1) / PAGE_SIZE as u64;
 
-            // 1. Check dirty pages first
-            if let Some(page) = self.dirty_pages.get(&page_idx) {
-                if page_offset < page.len() {
-                    buf[pos] = page[page_offset];
-                    continue;
-                }
-            }
-
-            // 2. Check clean page cache
-            if let Some(page) = self.cached_pages.get(&page_idx) {
-                if page_offset < page.len() {
-                    buf[pos] = page[page_offset];
-                    continue;
-                }
-            }
-
-            // 3. Page miss: fetch page via BidiReadObject stream
+        for page_idx in start_page..=end_page {
             let page_start = page_idx * PAGE_SIZE as u64;
-            let fetched = self.fetch_range_from_gcs(page_start, PAGE_SIZE).await?;
-            if page_offset < fetched.len() {
-                buf[pos] = fetched[page_offset];
+            let page_data = if let Some(p) = self.dirty_pages.get(&page_idx) {
+                p.clone()
+            } else if let Some(p) = self.cached_pages.get(&page_idx) {
+                p.clone()
             } else {
-                buf[pos] = 0;
+                let fetched = self.fetch_range_from_gcs(page_start, PAGE_SIZE).await?;
+                self.cached_pages.insert(page_idx, fetched.clone());
+                fetched
+            };
+
+            let overlap_start = offset.max(page_start);
+            let overlap_end = (offset + readable_bytes as u64).min(page_start + PAGE_SIZE as u64);
+            let buf_start = (overlap_start - offset) as usize;
+            let buf_end = (overlap_end - offset) as usize;
+            let page_off = (overlap_start - page_start) as usize;
+            let copy_len = (overlap_end - overlap_start) as usize;
+
+            if page_off < page_data.len() {
+                let avail = (page_data.len() - page_off).min(copy_len);
+                buf[buf_start..buf_start + avail].copy_from_slice(&page_data[page_off..page_off + avail]);
+                if avail < copy_len {
+                    buf[buf_start + avail..buf_end].fill(0);
+                }
+            } else {
+                buf[buf_start..buf_end].fill(0);
             }
-            self.cached_pages.insert(page_idx, fetched);
         }
 
         // Check if this was a short read
@@ -257,18 +257,33 @@ impl GcsDbFile {
             }
         }
 
-        // 2. Commit atomically to GCS using write_object with generation precondition
+        // 2. Commit atomically to GCS Rapid using open_appendable_object + append + finalize
         let formatted_bucket = self.uri.formatted_bucket();
-        let mut write_req = self.storage.write_object(&formatted_bucket, &self.uri.object, Bytes::from(full_payload));
+        let mut builder = self.storage.open_appendable_object(&formatted_bucket, &self.uri.object);
 
         if let Some(gen) = self.generation {
-            write_req = write_req.set_if_generation_match(gen);
+            builder = builder.set_if_generation_match(gen);
         }
 
-        match write_req.send_buffered().await {
-            Ok(obj) => {
-                self.generation = Some(obj.generation);
-                self.size = obj.size as u64;
+        let mut writer = match builder.send().await {
+            Ok(w) => w,
+            Err(e) => {
+                set_last_error(format!("Failed opening appendable DB object gs://{}/{}: {}", self.uri.bucket, self.uri.object, e));
+                return Err(SQLITE_IOERR_WRITE);
+            }
+        };
+
+        if !full_payload.is_empty() {
+            if let Err(e) = writer.append(Bytes::from(full_payload)).await {
+                set_last_error(format!("Failed appending DB data to gs://{}/{}: {}", self.uri.bucket, self.uri.object, e));
+                return Err(SQLITE_IOERR_WRITE);
+            }
+        }
+
+        match writer.finalize().await {
+            Ok(sealed_obj) => {
+                self.generation = Some(sealed_obj.generation);
+                self.size = sealed_obj.size as u64;
 
                 // Move dirty pages into cached pages
                 for (idx, page) in std::mem::take(&mut self.dirty_pages) {
@@ -289,7 +304,7 @@ impl GcsDbFile {
                 Ok(())
             }
             Err(e) => {
-                set_last_error(format!("Atomic upload failed on gs://{}/{}: {}", self.uri.bucket, self.uri.object, e));
+                set_last_error(format!("Atomic upload finalization failed on gs://{}/{}: {}", self.uri.bucket, self.uri.object, e));
                 Err(SQLITE_IOERR_WRITE)
             }
         }

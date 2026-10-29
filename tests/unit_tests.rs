@@ -56,6 +56,10 @@ fn test_wal_filename_derivation() {
     assert_eq!(uri.shm_object(), "data/store.sqlite-shm");
     assert_eq!(uri.to_gs_uri(), "gs://my-bucket/data/store.sqlite");
     assert!(is_wal_file("gs://my-bucket/data/store.sqlite-wal"));
+
+    let wal_uri = parse_gcs_uri("gs://my-bucket/data/store.sqlite-wal").unwrap();
+    assert_eq!(wal_uri.wal_object(), "data/store.sqlite-wal");
+    assert_eq!(wal_uri.shm_object(), "data/store.sqlite-shm");
 }
 
 #[test]

@@ -10,7 +10,7 @@ use crate::error::*;
 use crate::gcs::client::{block_on, get_storage_client_sync};
 use crate::gcs::db_file::GcsDbFile;
 use crate::gcs::wal_file::GcsWalFile;
-use crate::io::{GCS_DB_IO_METHODS, GCS_WAL_IO_METHODS, GcsFileHandle, GcsSqliteFile};
+use crate::io::{GCS_DB_IO_METHODS, GCS_MEM_IO_METHODS, GCS_WAL_IO_METHODS, GcsFileHandle, GcsSqliteFile, MemFile};
 use crate::uri::{is_gcs_path, is_shm_file, is_wal_file, parse_gcs_uri};
 
 // SQLite Open flags
@@ -204,6 +204,24 @@ unsafe extern "C" fn vfs_xOpen(
         return SQLITE_CANTOPEN;
     }
 
+    // Rollback journals and temporary/transient files:
+    // When activating WAL mode, SQLite creates a temporary rollback journal to commit the WAL header.
+    // We serve all rollback journals, temporary DBs, and transient files in memory.
+    let is_journal_or_temp = (flags & (SQLITE_OPEN_MAIN_JOURNAL | SQLITE_OPEN_TEMP_JOURNAL | SQLITE_OPEN_SUBJOURNAL | SQLITE_OPEN_SUPER_JOURNAL | SQLITE_OPEN_TRANSIENT_DB | SQLITE_OPEN_TEMP_DB)) != 0
+        || raw_path.ends_with("-journal");
+
+    if is_journal_or_temp {
+        tracing::debug!(target: "gcs_vfs", "Opening in-memory transient/journal file: {}", raw_path);
+        let file_ptr = p_file as *mut GcsSqliteFile;
+        (*file_ptr).p_methods = &GCS_MEM_IO_METHODS;
+        (*file_ptr).handle = Box::into_raw(Box::new(GcsFileHandle::Mem(Box::new(MemFile::new()))));
+        (*file_ptr).lock_state = SQLITE_LOCK_NONE;
+        if !p_out_flags.is_null() {
+            *p_out_flags = flags;
+        }
+        return SQLITE_OK;
+    }
+
     // Check if path is a GCS database or WAL
     if is_gcs_path(raw_path) {
         let uri = match parse_gcs_uri(raw_path) {
@@ -273,6 +291,10 @@ unsafe extern "C" fn vfs_xDelete(
         return SQLITE_OK;
     }
     if let Ok(path) = CStr::from_ptr(z_name).to_str() {
+        if path.ends_with("-journal") {
+            tracing::debug!(target: "gcs_vfs", "Delete requested for in-memory journal: {}", path);
+            return SQLITE_OK;
+        }
         if is_gcs_path(path) {
             // In WAL mode, SQLite might attempt to delete WAL after closing
             tracing::info!(target: "gcs_vfs", "Delete requested for GCS path: {}", path);

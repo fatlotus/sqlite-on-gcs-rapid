@@ -184,28 +184,37 @@ impl GcsWalFile {
         }
 
         let readable_bytes = ((self.logical_size - offset) as usize).min(amt);
+        let read_slice = &mut buf[..readable_bytes];
 
-        for i in 0..readable_bytes {
-            let cur_offset = offset + i as u64;
+        let req_start = offset;
+        let req_end = offset + readable_bytes as u64;
 
-            // 1. Check un-flushed memory buffer (Finding 3)
-            let in_unflushed = !self.unflushed_buffer.is_empty()
-                && cur_offset >= self.unflushed_start_offset
-                && cur_offset < self.unflushed_start_offset + self.unflushed_buffer.len() as u64;
+        let unflushed_start = self.unflushed_start_offset;
+        let unflushed_len = self.unflushed_buffer.len() as u64;
+        let unflushed_end = unflushed_start + unflushed_len;
 
-            if in_unflushed {
-                let idx = (cur_offset - self.unflushed_start_offset) as usize;
-                buf[i] = self.unflushed_buffer[idx];
-                continue;
+        // 1. Fetch persisted range from GCS Rapid via BidiReadObject if needed
+        let persisted_limit = self.persisted_size.min(unflushed_start);
+        if req_start < persisted_limit {
+            let fetch_end = req_end.min(persisted_limit);
+            let fetch_len = (fetch_end - req_start) as usize;
+            let fetched = self.fetch_persisted_range(req_start, fetch_len).await?;
+            let copy_len = fetched.len().min(fetch_len);
+            read_slice[..copy_len].copy_from_slice(&fetched[..copy_len]);
+            if copy_len < fetch_len {
+                read_slice[copy_len..fetch_len].fill(0);
             }
+        }
 
-            // 2. Fetch from GCS Rapid persisted log via BidiReadObject
-            let fetched = self.fetch_persisted_range(cur_offset, 1).await?;
-            if !fetched.is_empty() {
-                buf[i] = fetched[0];
-            } else {
-                buf[i] = 0;
-            }
+        // 2. Fetch unflushed in-memory buffer if needed
+        if unflushed_len > 0 && req_end > unflushed_start && req_start < unflushed_end {
+            let overlap_start = req_start.max(unflushed_start);
+            let overlap_end = req_end.min(unflushed_end);
+            let buf_offset = (overlap_start - req_start) as usize;
+            let src_start = (overlap_start - unflushed_start) as usize;
+            let copy_len = (overlap_end - overlap_start) as usize;
+            read_slice[buf_offset..buf_offset + copy_len]
+                .copy_from_slice(&self.unflushed_buffer[src_start..src_start + copy_len]);
         }
 
         // Short-read zero-fill guarantee (Finding 1)
