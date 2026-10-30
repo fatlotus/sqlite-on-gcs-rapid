@@ -1,2 +1,2 @@
 [build]
-rustflags = ["--cfg", "google_cloud_unstable_storage_bidi"]
+rustflags = ["--cfg", "google_cloud_unstable_storage_bidi", "-C", "link-arg=-Wl,-z,nodelete"]

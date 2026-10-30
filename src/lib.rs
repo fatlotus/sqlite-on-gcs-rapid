@@ -29,6 +29,9 @@ fn init_logging() {
     });
 }
 
+/// Return code for persistent VFS extensions (SQLite 3.25+) preventing dlclose unloading.
+pub const SQLITE_OK_LOAD_PERMANENTLY: libc::c_int = 256;
+
 /// Core extension entry point called by SQLite when loading this extension.
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_extension_init(
@@ -43,7 +46,7 @@ pub unsafe extern "C" fn sqlite3_extension_init(
     match register_gcs_vfs(false) {
         Ok(()) => {
             tracing::info!(target: "gcs_vfs", "GCS Rapid VFS ('gcsrapid') registered successfully.");
-            SQLITE_OK
+            SQLITE_OK_LOAD_PERMANENTLY
         }
         Err(rc) => {
             let msg = "Failed to register GCS Rapid VFS with SQLite";
